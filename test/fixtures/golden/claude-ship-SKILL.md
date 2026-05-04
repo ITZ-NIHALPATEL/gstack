@@ -343,6 +343,35 @@ _BRAIN_REMOTE_FILE="$HOME/.gstack-brain-remote.txt"
 _BRAIN_SYNC_BIN="~/.claude/skills/gstack/bin/gstack-brain-sync"
 _BRAIN_CONFIG_BIN="~/.claude/skills/gstack/bin/gstack-config"
 
+# /sync-gbrain context-load: teach the agent to use gbrain when it's available.
+# Mutually exclusive variants per /plan-eng-review §4. Empty string when gbrain
+# is not configured (zero context cost for non-gbrain users).
+_GBRAIN_CONFIG="$HOME/.gbrain/config.json"
+if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
+  _GBRAIN_VERSION_OK=$(gbrain --version 2>/dev/null | grep -c '^gbrain ' || echo 0)
+  if [ "$_GBRAIN_VERSION_OK" -gt 0 ] 2>/dev/null; then
+    _SYNC_STATE="$_GSTACK_HOME/.gbrain-sync-state.json"
+    _CWD_PAGES=0
+    if [ -f "$_SYNC_STATE" ]; then
+      # Flatten newlines so the regex works against pretty-printed JSON too.
+      _CWD_PAGES=$(tr -d '\n' < "$_SYNC_STATE" 2>/dev/null \
+        | grep -o '"name": *"code"[^}]*"detail": *{[^}]*"page_count": *[0-9]*' \
+        | grep -o '"page_count": *[0-9]*' | grep -o '[0-9]\+' | head -1)
+      _CWD_PAGES=${_CWD_PAGES:-0}
+    fi
+    if [ "$_CWD_PAGES" -gt 0 ] 2>/dev/null; then
+      echo "GBrain configured. Prefer \`gbrain search\`/\`gbrain query\` over Grep for"
+      echo "semantic questions; use \`gbrain code-def\`/\`code-refs\`/\`code-callers\` for"
+      echo "symbol-aware code lookup. See \"## GBrain Search Guidance\" in CLAUDE.md."
+      echo "Run /sync-gbrain to refresh."
+    else
+      echo "GBrain configured but this repo isn't indexed yet. Run \`/sync-gbrain --full\`"
+      echo "before relying on \`gbrain search\` for code questions in this repo."
+      echo "Falls back to Grep until indexed."
+    fi
+  fi
+fi
+
 _BRAIN_SYNC_MODE=$("$_BRAIN_CONFIG_BIN" get gbrain_sync_mode 2>/dev/null || echo off)
 
 if [ -f "$_BRAIN_REMOTE_FILE" ] && [ ! -d "$_GSTACK_HOME/.git" ] && [ "$_BRAIN_SYNC_MODE" = "off" ]; then
@@ -2213,7 +2242,7 @@ If `OLD_CFG` is `disabled`: skip Codex passes only. Claude adversarial subagent 
 Dispatch via the Agent tool. The subagent has fresh context — no checklist bias from the structured review. This genuine independence catches things the primary reviewer is blind to.
 
 Subagent prompt:
-"Read the diff for this branch with `git diff origin/<base>`. Think like an attacker and a chaos engineer. Your job is to find ways this code will fail in production. Look for: edge cases, race conditions, security holes, resource leaks, failure modes, silent data corruption, logic errors that produce wrong results silently, error handling that swallows failures, and trust boundary violations. Be adversarial. Be thorough. No compliments — just the problems. For each finding, classify as FIXABLE (you know how to fix it) or INVESTIGATE (needs human judgment)."
+"Read the diff for this branch with `git diff origin/<base>`. Think like an attacker and a chaos engineer. Your job is to find ways this code will fail in production. Look for: edge cases, race conditions, security holes, resource leaks, failure modes, silent data corruption, logic errors that produce wrong results silently, error handling that swallows failures, and trust boundary violations. Be adversarial. Be thorough. No compliments — just the problems. For each finding, classify as FIXABLE (you know how to fix it) or INVESTIGATE (needs human judgment). After listing findings, end your output with ONE line in the canonical format `Recommendation: <action> because <one-line reason naming the most exploitable finding>` — examples: `Recommendation: Fix the unbounded retry at queue.ts:78 because it'll DoS the worker pool under sustained 429s` or `Recommendation: Ship as-is because the strongest finding is a theoretical race that requires conditions we can't trigger in production`. The reason must point to a specific finding (or no-fix rationale). Generic reasons like 'because it's safer' do not qualify."
 
 Present findings under an `ADVERSARIAL REVIEW (Claude subagent):` header. **FIXABLE findings** flow into the same Fix-First pipeline as the structured review. **INVESTIGATE findings** are presented as informational.
 
@@ -2228,7 +2257,7 @@ If Codex is available AND `OLD_CFG` is NOT `disabled`:
 ```bash
 TMPERR_ADV=$(mktemp /tmp/codex-adv-XXXXXXXX)
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-codex exec "IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.\n\nReview the changes on this branch against the base branch. Run git diff origin/<base> to see the diff. Your job is to find ways this code will fail in production. Think like an attacker and a chaos engineer. Find edge cases, race conditions, security holes, resource leaks, failure modes, and silent data corruption paths. Be adversarial. Be thorough. No compliments — just the problems." -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR_ADV"
+codex exec "IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.\n\nReview the changes on this branch against the base branch. Run git diff origin/<base> to see the diff. Your job is to find ways this code will fail in production. Think like an attacker and a chaos engineer. Find edge cases, race conditions, security holes, resource leaks, failure modes, and silent data corruption paths. Be adversarial. Be thorough. No compliments — just the problems. End your output with ONE line in the canonical format `Recommendation: <action> because <one-line reason naming the most exploitable finding>`. Generic reasons like 'because it's safer' do not qualify; the reason must point to a specific finding or no-fix rationale." -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR_ADV"
 ```
 
 Set the Bash tool's `timeout` parameter to `300000` (5 minutes). Do NOT use the `timeout` shell command — it doesn't exist on macOS. After the command completes, read stderr:
