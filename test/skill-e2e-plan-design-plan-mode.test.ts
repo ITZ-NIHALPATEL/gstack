@@ -13,6 +13,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   runPlanSkillObservation,
   assertReportAtBottomIfPlanWritten,
+  isProseAUQVisible,
 } from './helpers/claude-pty-runner';
 
 const shouldRun = !!process.env.EVALS && process.env.EVALS_TIER === 'gate';
@@ -59,7 +60,11 @@ describeE2E('plan-design-review plan-mode smoke (gate)', () => {
       timeoutMs: 300_000,
     });
 
+    // Surface visibility check (same as ceo / autoplan migrations): user
+    // must SEE the question via BLOCKED string OR prose-rendered AUQ options.
     const blockedVisible = /BLOCKED\s*[—-]\s*AskUserQuestion/i.test(obs.evidence);
+    const proseAUQVisible = isProseAUQVisible(obs.evidence);
+    const surfaceVisible = blockedVisible || proseAUQVisible;
 
     if (
       obs.outcome === 'auto_decided' ||
@@ -73,9 +78,9 @@ describeE2E('plan-design-review plan-mode smoke (gate)', () => {
           `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
       );
     }
-    if (obs.outcome === 'exited' && !blockedVisible) {
+    if (obs.outcome === 'exited' && !surfaceVisible) {
       throw new Error(
-        `plan-design-review AskUserQuestion-blocked regression: outcome=exited without BLOCKED — AskUserQuestion string in TTY. Model quit silently instead of surfacing the failure mode.\n` +
+        `plan-design-review AskUserQuestion-blocked regression: outcome=exited without any visible question surface (no BLOCKED string, no prose-rendered AUQ options). Model quit silently.\n` +
           `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
       );
     }

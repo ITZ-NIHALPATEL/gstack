@@ -31,7 +31,11 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { runPlanSkillObservation, planFileHasDecisionsSection } from './helpers/claude-pty-runner';
+import {
+  runPlanSkillObservation,
+  planFileHasDecisionsSection,
+  isProseAUQVisible,
+} from './helpers/claude-pty-runner';
 
 const shouldRun = !!process.env.EVALS && process.env.EVALS_TIER === 'gate';
 const describeE2E = shouldRun ? describe : describe.skip;
@@ -56,7 +60,14 @@ describeE2E('autoplan AskUserQuestion-blocked smoke (gate)', () => {
       timeoutMs: 300_000,
     });
 
+    // The user must SEE the question one way or another. Three valid surfaces:
+    //   1. `## Decisions to confirm` section in the plan file (legacy fallback path)
+    //   2. `BLOCKED — AskUserQuestion` string visible in TTY (post-v1.28 BLOCKED rule)
+    //   3. Numbered/lettered options visible in TTY as prose (post-v1.28 prose-AUQ rendering)
+    // If NONE of these are present, the question was silently buried.
     const blockedVisible = /BLOCKED\s*[—-]\s*AskUserQuestion/i.test(obs.evidence);
+    const proseAUQVisible = isProseAUQVisible(obs.evidence);
+    const surfaceVisible = blockedVisible || proseAUQVisible;
 
     if (
       obs.outcome === 'auto_decided' ||
@@ -70,17 +81,17 @@ describeE2E('autoplan AskUserQuestion-blocked smoke (gate)', () => {
           `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
       );
     }
-    if (obs.outcome === 'exited' && !blockedVisible) {
+    if (obs.outcome === 'exited' && !surfaceVisible) {
       throw new Error(
-        `autoplan AskUserQuestion-blocked regression: outcome=exited without BLOCKED — AskUserQuestion string in TTY. Model quit silently instead of surfacing the failure mode.\n` +
+        `autoplan AskUserQuestion-blocked regression: outcome=exited without any visible question surface (no BLOCKED string, no prose-rendered AUQ options). Model quit silently.\n` +
           `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
       );
     }
     if (obs.outcome === 'plan_ready') {
       const decisionsOk = obs.planFile && planFileHasDecisionsSection(obs.planFile);
-      if (!decisionsOk && !blockedVisible) {
+      if (!decisionsOk && !surfaceVisible) {
         throw new Error(
-          `autoplan AskUserQuestion-blocked regression: plan_ready without a "## Decisions" section in ${obs.planFile ?? '<no plan file detected>'} AND no BLOCKED string in TTY — Phase 1 premise gate was silently skipped.\n` +
+          `autoplan AskUserQuestion-blocked regression: plan_ready without any visible question surface (no "## Decisions" section in ${obs.planFile ?? '<no plan file detected>'}, no BLOCKED string, no prose AUQ options) — Phase 1 premise gate was silently skipped.\n` +
             `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
         );
       }

@@ -38,6 +38,7 @@ import {
   runPlanSkillObservation,
   planFileHasDecisionsSection,
   assertReportAtBottomIfPlanWritten,
+  isProseAUQVisible,
 } from './helpers/claude-pty-runner';
 
 const shouldRun = !!process.env.EVALS && process.env.EVALS_TIER === 'gate';
@@ -109,7 +110,13 @@ describeE2E('plan-ceo-review plan-mode smoke (gate)', () => {
       timeoutMs: 300_000,
     });
 
+    // The user must SEE the question one way or another. Three valid surfaces:
+    //   1. `## Decisions to confirm` section in the plan file (legacy fallback)
+    //   2. `BLOCKED — AskUserQuestion` string visible in TTY (post-v1.28 BLOCKED rule)
+    //   3. Numbered/lettered options visible in TTY as prose (post-v1.28 prose-AUQ rendering)
     const blockedVisible = /BLOCKED\s*[—-]\s*AskUserQuestion/i.test(obs.evidence);
+    const proseAUQVisible = isProseAUQVisible(obs.evidence);
+    const surfaceVisible = blockedVisible || proseAUQVisible;
 
     if (
       obs.outcome === 'auto_decided' ||
@@ -123,30 +130,23 @@ describeE2E('plan-ceo-review plan-mode smoke (gate)', () => {
           `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
       );
     }
-    // 'exited' is acceptable ONLY when BLOCKED string is visible (post-fix
-    // path). Without BLOCKED, exited means the model crashed or quit silently.
-    if (obs.outcome === 'exited') {
-      if (!blockedVisible) {
-        throw new Error(
-          `plan-ceo-review AskUserQuestion-blocked regression: outcome=exited without BLOCKED — AskUserQuestion string in TTY. Model quit silently instead of surfacing the failure mode.\n` +
-            `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
-        );
-      }
+    if (obs.outcome === 'exited' && !surfaceVisible) {
+      throw new Error(
+        `plan-ceo-review AskUserQuestion-blocked regression: outcome=exited without any visible question surface (no BLOCKED string, no prose-rendered AUQ options). Model quit silently.\n` +
+          `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
+      );
     }
-    // 'plan_ready' is acceptable when EITHER (legacy) the model wrote a
-    // "## Decisions to confirm" section OR (post-fix) BLOCKED is visible
-    // in the TTY. Neither = silent ExitPlanMode = the regression we catch.
     if (obs.outcome === 'plan_ready') {
       if (!obs.planFile) {
-        if (!blockedVisible) {
+        if (!surfaceVisible) {
           throw new Error(
-            `plan-ceo-review AskUserQuestion-blocked regression: outcome=plan_ready but no plan file path detected and no BLOCKED string in TTY. Cannot verify the model used either the legacy fallback or the post-fix BLOCKED path.\n` +
+            `plan-ceo-review AskUserQuestion-blocked regression: outcome=plan_ready but no plan file path detected, no BLOCKED string, no prose AUQ options. Cannot verify the model used any legitimate path.\n` +
               `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
           );
         }
-      } else if (!planFileHasDecisionsSection(obs.planFile) && !blockedVisible) {
+      } else if (!planFileHasDecisionsSection(obs.planFile) && !surfaceVisible) {
         throw new Error(
-          `plan-ceo-review AskUserQuestion-blocked regression: model wrote ${obs.planFile} without a "## Decisions" section AND no BLOCKED string in TTY. Step 0 was silently skipped.\n` +
+          `plan-ceo-review AskUserQuestion-blocked regression: model wrote ${obs.planFile} without a "## Decisions" section AND no BLOCKED string AND no prose AUQ options in TTY. Step 0 was silently skipped.\n` +
             `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
         );
       }

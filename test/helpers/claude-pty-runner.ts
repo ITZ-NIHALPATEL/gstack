@@ -1034,9 +1034,22 @@ export function assertReviewReportAtBottom(
  * `'wrote_findings_before_asking'` when a plan was already written.
  */
 export function assertReportAtBottomIfPlanWritten(
-  obs: { planFile?: string; evidence: string },
+  obs: { planFile?: string; evidence: string; outcome?: string },
 ): void {
   if (!obs.planFile) return;
+  // Skip when the plan file path was detected from TTY output but no file
+  // exists on disk. This happens when the model mentions a path mid-stream
+  // (e.g., as a tool-call argument that was interrupted, or in a draft that
+  // was never persisted). The report-at-bottom contract is for fully-written
+  // plan files; ENOENT means there's no file content to enforce against.
+  if (!fs.existsSync(obs.planFile)) return;
+  // Skip on 'asked' outcomes — these are smoke tests that exited at the
+  // first AUQ render (Step 0 only). The model never reached the workflow's
+  // report-writing step, so a partial plan file without the report section
+  // is the expected mid-flight state, not a contract violation. The
+  // report-at-bottom check applies to outcomes that imply the workflow
+  // ran end-to-end (plan_ready, completion_summary, etc.).
+  if (obs.outcome === 'asked') return;
   const content = fs.readFileSync(obs.planFile, 'utf-8');
   const verdict = assertReviewReportAtBottom(content);
   if (!verdict.ok) {
