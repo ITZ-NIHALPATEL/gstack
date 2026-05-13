@@ -1,5 +1,100 @@
 # Changelog
 
+## [1.34.1.0] - 2026-05-13
+
+## **`gstack-update-check` resolves remote VERSION via a SHA-pinned URL.**
+## **A semver-order guard makes sure the script never proposes a downgrade.**
+
+The version check now runs `git ls-remote https://github.com/garrytan/gstack.git refs/heads/main` to get the live HEAD SHA, then fetches `raw.githubusercontent.com/garrytan/gstack/<SHA>/VERSION`. SHA-pinned raw URLs are immediately consistent, so a freshly-published VERSION shows up right away instead of trailing behind the branch-raw CDN by several minutes. A second guard treats `REMOTE < LOCAL` as up-to-date, so transient stale-CDN responses and dev installs running ahead of main can never produce a backwards `UPGRADE_AVAILABLE` line. The `git ls-remote` call is fenced with `GIT_TERMINAL_PROMPT=0` plus a 5-second low-speed timeout so flaky networks and captive portals cannot hang a skill preamble.
+
+### The numbers that matter
+
+Source: `bun test browse/test/gstack-update-check.test.ts` — 35 existing tests + 3 new semver-guard tests, all green in 1.65s.
+
+| Surface | Before | After |
+|---|---|---|
+| Remote VERSION fetch | branch-raw URL (`/garrytan/gstack/main/VERSION`), can serve stale content for minutes after a push | `git ls-remote` SHA, then SHA-pinned raw URL (immediately consistent), branch-raw kept as fallback |
+| Behavior when REMOTE < LOCAL | `UPGRADE_AVAILABLE <local> <older>` (backwards downgrade prompt) | `UP_TO_DATE <local>` (silent, semver-order guard via `sort -V`) |
+| `GSTACK_REMOTE_URL` override semantics | Always honored | Skipped when explicit; preserves `file://` test fixtures and private mirrors |
+| `git ls-remote` hang exposure | Not used | `GIT_TERMINAL_PROMPT=0` + `GIT_HTTP_LOW_SPEED_LIMIT=1000` + `GIT_HTTP_LOW_SPEED_TIME=5` enforce a 5-second floor on hung connections |
+| Multi-segment version comparison | `[ "$LOCAL" = "$REMOTE" ]` only | `printf "%s\n%s\n" $LOCAL $REMOTE | sort -V | tail -1` validates ordering. `1.9.0.0 < 1.10.0.0` both directions |
+| Test coverage for these failure modes | 0 tests | 3 new tests: REMOTE older than LOCAL, multi-segment forward, multi-segment reverse |
+
+The semver guard catches the failure shape directly. If GitHub's branch-raw CDN ever serves stale content again, the script stays silent instead of asking the user to "upgrade" to a version they already passed.
+
+### What this means for builders
+
+Run `/gstack-upgrade` immediately after a new release and the script finds the new VERSION via the live ref instead of waiting for the CDN to refresh. Dev installs running ahead of main also stay quiet now, no more backwards prompts every preamble. No action required, the fix is automatic on upgrade.
+
+### Itemized changes
+
+#### Fixed
+
+- **`bin/gstack-update-check`** — replaced the unconditional `curl` of `raw.githubusercontent.com/.../main/VERSION` with a SHA-pinned fetch path that resolves the live HEAD via `git ls-remote` first, then curls `raw.githubusercontent.com/garrytan/gstack/<SHA>/VERSION`. Branch-raw fetch kept as fallback when `git ls-remote` is unavailable or `GSTACK_REMOTE_URL` is explicitly set.
+- **`bin/gstack-update-check`** — added a semver-order guard. After fetching REMOTE, the script runs `sort -V` to confirm REMOTE > LOCAL before emitting `UPGRADE_AVAILABLE`. When LOCAL is at or ahead of REMOTE, it writes `UP_TO_DATE` and exits silently.
+- **`bin/gstack-update-check`** — fenced `git ls-remote` with `GIT_TERMINAL_PROMPT=0`, `GIT_HTTP_LOW_SPEED_LIMIT=1000`, and `GIT_HTTP_LOW_SPEED_TIME=5` so a flaky network cannot hang every skill preamble.
+
+#### Added
+
+- **`browse/test/gstack-update-check.test.ts`** — 3 new tests covering: REMOTE older than LOCAL stays silent and caches `UP_TO_DATE`, multi-segment `1.9.0.0 < 1.10.0.0` produces `UPGRADE_AVAILABLE`, multi-segment `1.10.0.0 > 1.9.0.0` stays silent.
+
+## [1.34.0.0] - 2026-05-12
+
+## **GStack is now consumable as a submodule.**
+## **Five new exported helpers + `AUTH_TOKEN` env injection + `import.meta.main` gate let downstream Bun projects embed the browse server without forking.**
+
+GStack's `browse/src/server.ts` started life as a CLI entry point: import it and it would bind `Bun.serve` at module load, claim a random port, and write project state to your `.gstack/` dir. Every embedder that wanted to consume gstack as a library had to fork or vendor the file. This release flips that. The browse server now ships an exported API surface (`ServerConfig`, `ServerHandle`, `resolveConfigFromEnv`, `start`), honors `process.env.AUTH_TOKEN` for embedder-driven token allocation, and gates all module-load side effects on `import.meta.main` so plain `import` from a third-party Bun program runs zero side effects. The fetch-handler factory contract is documented in the new types; the runtime factory function (`buildFetchHandler`) is a deliberate follow-up — Phoenix can ship today against the start()+env surface.
+
+The same release ships three security hardening fixes from adversarial review and a real TDZ regression bug fix that surfaced only when `claude` is missing from `PATH`.
+
+### The numbers that matter
+
+Source: `bun test browse/test/` against this branch — 5 new test files + 1 extended.
+
+| Surface | Before | After |
+|---|---|---|
+| Import `browse/src/server.ts` from a third-party process | Auto-starts a daemon, binds `Bun.serve`, writes state | No side effects (gated on `import.meta.main`) |
+| `AUTH_TOKEN` source | Always `crypto.randomUUID()` at module load | `process.env.AUTH_TOKEN` (sanitized, >= 16 chars after unicode-whitespace strip) → randomUUID fallback |
+| Exported API for embedders | None (`start` was internal, no types) | `ServerConfig`, `ServerHandle`, `resolveConfigFromEnv`, `start`, `sanitizeAuthToken` |
+| `isCustomChromium()` detection | Did not exist | Exported helper: `GSTACK_CHROMIUM_KIND=custom-extension-baked` preferred, path substring fallback |
+| Chromium profile path | Hardcoded `$HOME/.gstack/chromium-profile` | `resolveChromiumProfile(explicit?)` honors arg → `CHROMIUM_PROFILE` env → `$GSTACK_HOME/chromium-profile` |
+| Stale `SingletonLock` / `Socket` / `Cookie` cleanup | Inline at two callsites with raw `fs.unlinkSync` | One helper (`cleanSingletonLocks`) with absolute-path requirement + basename-or-env match guard |
+| TDZ on missing `claude` CLI | Latent `ReferenceError` in `checkTranscript` early-return path | `finish()` hoisted above `resolveClaudeCommand()` + try/catch wrap |
+| `AUTH_TOKEN=$'﻿'` (BOM-only) accepted by `.trim()` | Yes (one-character bearer secret) | No (rejected by unicode-whitespace strip + 16-char minimum) |
+| Tests covering new surfaces | 0 | 34 new tests across 5 files (16 in extended `config.test.ts`, 8 `isCustomChromium`, 1 TDZ regression, 12 factory API + side-effect guard) |
+
+The adversarial review pass found the BOM-token bypass before merge — `.trim()` strips ASCII whitespace but not U+FEFF / U+200B / U+00A0. New `sanitizeAuthToken()` uses a unicode-aware regex and rejects anything shorter than 16 chars after stripping, so a misconfigured embedder can no longer ship a one-character bearer.
+
+### What this means for builders embedding gstack
+
+Phoenix and any future Bun-based consumer can now `import { start, resolveConfigFromEnv } from 'browse-server-upstream/browse/src/server'`, set `AUTH_TOKEN` + `BROWSE_PORT` env, and run gstack as a child without forking. The exported `ServerConfig` documents the full factory contract for the eventual `buildFetchHandler` runtime — when that lands in the follow-up PR, today's API surface becomes a no-op compat shim. Run `/gstack-upgrade` to pick it up. The browse CLI behavior (`bun run dev <command>`) is unchanged.
+
+### Itemized changes
+
+### Added
+- `browse/src/config.ts`: `resolveGstackHome()` (honors `GSTACK_HOME`, falls back to `os.homedir()/.gstack`), `resolveChromiumProfile(explicit?)`, `cleanSingletonLocks(dir)` with defensive absolute-path + basename/env guard.
+- `browse/src/browser-manager.ts`: exported `isCustomChromium()` with `GSTACK_CHROMIUM_KIND=custom-extension-baked` preferred signal, substring fallback on `GSTACK_CHROMIUM_PATH`.
+- `browse/src/server.ts`: `ServerConfig` and `ServerHandle` types, `resolveConfigFromEnv()`, `sanitizeAuthToken()`, exported `start()`. `AUTH_TOKEN` honors env with unicode-aware sanitization.
+- `browse/test/config.test.ts`: 16 new tests (env precedence, defensive guards, ENOENT idempotency).
+- `browse/test/browser-manager-custom-chromium.test.ts`: 8 tests covering env-kind, path substring, stock chromium, playwright-bundled cases.
+- `browse/test/security-classifier-tdz.test.ts`: regression test for the missing-CLI degraded path (IRON RULE).
+- `browse/test/server-factory.test.ts`: 14 tests covering AUTH_TOKEN env semantics + type-surface compile checks + preserved exports.
+- `browse/test/server-no-import-side-effects.test.ts`: subprocess sentinel proving `import` doesn't auto-start.
+
+### Changed
+- `browse/src/security-classifier.ts`: `finish()` hoisted above `resolveClaudeCommand()` in `checkTranscript` Promise executor. `resolveClaudeCommand()` and `spawn()` calls wrapped in try/catch that degrade to a structured signal instead of rejecting the Promise.
+- `browse/src/browser-manager.ts` `launchHeaded`: `--load-extension` gated on `!isCustomChromium()` (prevents `ServiceWorkerState::SetWorkerId` DCHECK with extension-baked custom Chromium). Profile path switches to `resolveChromiumProfile()`. Pre-launch `cleanSingletonLocks(userDataDir)` added.
+- `browse/src/server.ts`: signal handlers (SIGINT, SIGTERM, Windows `exit`, `uncaughtException`, `unhandledRejection`) and the auto-kickoff `start().catch(...)` at module bottom now gated on `import.meta.main`. `shutdown()` and `emergencyCleanup()` swap inline `SingletonLock`/`Socket`/`Cookie` loops for `cleanSingletonLocks(resolveChromiumProfile())`.
+
+### Fixed
+- TDZ `ReferenceError` in `checkTranscript` when `claude` CLI is missing from `PATH` (latent — only triggered the dormant code path).
+- AUTH_TOKEN unicode-whitespace bypass: `.trim()` only stripped ASCII whitespace, so a `process.env.AUTH_TOKEN=$'﻿'` (BOM) or `$'​'` (zero-width space) became a one-character bearer secret. New `sanitizeAuthToken()` strips all unicode whitespace and rejects anything shorter than 16 chars.
+- `cleanSingletonLocks` path-traversal hardening: now requires absolute paths and matches against absolute-resolved `CHROMIUM_PROFILE` env, blocking CWD-relative footguns.
+
+### For contributors
+- The full `buildFetchHandler` runtime extraction (hybrid hoist of 13 module-level mutables into a factory closure, plus `beforeRoute` auth-then-hook wiring, plus `stopListeners` implementation) is **deferred to a follow-up PR**. The exported types document the eventual contract; today's release ships the minimum-viable surface so Phoenix can land v0.6.0.0 against `import { start }` + AUTH_TOKEN env.
+- See `/Users/garrytan/.claude/plans/system-instruction-you-are-working-swirling-fountain.md` for the full plan + 13 decisions + codex outside-voice tensions resolved.
+
 ## [1.33.2.0] - 2026-05-11
 
 ## **`./setup` no longer pollutes the global install when run from a Conductor worktree.**
