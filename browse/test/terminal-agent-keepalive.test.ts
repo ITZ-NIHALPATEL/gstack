@@ -37,9 +37,11 @@ describe('terminal-agent WS keepalive (v1.44+)', () => {
   test('3. WS close handler clears the ping interval', () => {
     const src = fs.readFileSync(AGENT_TS, 'utf-8');
     const wsBlock = sliceBetween(src, 'websocket: {', 'function handleTabState');
-    // close(ws) MUST clearInterval the pingInterval — otherwise we leak
-    // timers across reconnects and the ping handler captures a dead ws ref.
-    expect(wsBlock).toMatch(/close\s*\(\s*ws\s*\)/);
+    // close(ws, code?, reason?) MUST clearInterval the pingInterval —
+    // otherwise we leak timers across reconnects and the ping handler
+    // captures a dead ws ref. Signature widened in Commit 3 to include
+    // the close code for the detach state machine, hence the loose match.
+    expect(wsBlock).toMatch(/close\s*\(\s*ws/);
     expect(wsBlock).toContain('clearInterval(session.pingInterval)');
   });
 

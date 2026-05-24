@@ -66,7 +66,13 @@ describe('terminal-agent session routing (v1.44+ Commit 2)', () => {
 
   test('7. close() drops sessionsById entry alongside ws cleanup', () => {
     const src = fs.readFileSync(AGENT_TS, 'utf-8');
-    const block = sliceBetween(src, 'close(ws) {', 'function handleTabState');
+    // Commit 3 widened the close signature to `close(ws, code, _reason)`
+    // for the detach state machine. Match either shape so test is stable
+    // across the rest of the long-lived-sidebar PR.
+    const i = src.indexOf('close(ws');
+    expect(i).toBeGreaterThan(-1);
+    const j = src.indexOf('function handleTabState', i);
+    const block = src.slice(i, j);
     expect(block).toContain('sessionsById.delete(session.sessionId)');
   });
 

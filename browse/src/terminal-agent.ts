@@ -83,9 +83,17 @@ interface PtySession {
   rows: number;
   cookie: string;
   /**
+   * Current attached websocket. Swapped on re-attach (Commit 3): when a new
+   * WS upgrade matches this session's sessionId, the old liveWs is gone
+   * and the new ws takes its place. The PTY on-data callback closes over
+   * `session`, not the original `ws`, so it always writes to the current
+   * liveWs (or skips the write when detached and liveWs is null).
+   */
+  liveWs: any | null;
+  /**
    * v1.44+ stable session identifier (from pty-session-lease). Null for
    * legacy /internal/grant callers that didn't pass one. Used for
-   * targeted /internal/restart and (in Commit 3) re-attach lookups.
+   * targeted /internal/restart and Commit 3 re-attach lookups.
    */
   sessionId: string | null;
   spawned: boolean;
@@ -98,6 +106,35 @@ interface PtySession {
    * the underlying TCP from being silently dropped.
    */
   pingInterval: ReturnType<typeof setInterval> | null;
+  /**
+   * Commit 3 scrollback ring buffer. Each PTY write appends a frame; the
+   * total byte count is capped at RING_BUFFER_MAX_BYTES with oldest frames
+   * evicted first. On re-attach, the surviving frames are replayed as a
+   * single binary frame (prefixed with the v1.44 reset sequence) so the
+   * user sees their last screen of output. Frame boundaries preserve UTF-8
+   * + ANSI-CSI boundaries because each frame is the exact buffer that
+   * spawnClaude's on-data callback emitted.
+   */
+  ringBuffer: Buffer[];
+  ringBufferBytes: number;
+  /**
+   * Tracks whether the PTY is currently in xterm alt-screen mode. claude's
+   * TUI enters alt-screen (CSI ?1049h) during tool calls and exits (CSI
+   * ?1049l) when returning to the main prompt. On re-attach, the replay
+   * prelude must re-enter alt-screen if the original PTY left it active,
+   * otherwise the replay renders against the main screen and the cursor
+   * + colors end up in the wrong place.
+   */
+  altScreenActive: boolean;
+  /**
+   * Detach state machine (Commit 3). When the WS closes for a reason OTHER
+   * than the v1.44 intentional-restart code (4001), we keep the PtySession
+   * alive for the detach window (default 60s) so a re-attach within the
+   * window can resume the same PTY and replay the ring buffer. The timer
+   * disposes the session if no re-attach arrives in time.
+   */
+  detached: boolean;
+  detachTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
@@ -111,6 +148,84 @@ const KEEPALIVE_INTERVAL_MS = parseInt(
   process.env.GSTACK_PTY_KEEPALIVE_INTERVAL_MS || '25000',
   10,
 );
+
+/**
+ * Commit 3 scrollback ring buffer cap. 1 MB is enough for a full screen
+ * of dense claude output (including a recent tool result), small enough
+ * that a worst-case 10 detached sessions only cost ~10 MB of RSS.
+ * Env-overridable so e2e tests can verify eviction without writing 1 MB
+ * of fixture data per assertion.
+ */
+const RING_BUFFER_MAX_BYTES = parseInt(
+  process.env.GSTACK_PTY_RING_BUFFER_BYTES || `${1024 * 1024}`,
+  10,
+);
+
+/**
+ * Commit 3 detach window — how long to keep a session alive after WS
+ * close (with any code other than 4001 intentional-restart) so a
+ * re-attach can resume the same PTY. 60s is long enough to cover a
+ * Chrome MV3 service-worker suspend cycle, a wifi blip, or a brief
+ * laptop sleep; short enough that genuinely-closed sessions don't
+ * stack up unbounded.
+ */
+const DETACH_WINDOW_MS = parseInt(
+  process.env.GSTACK_PTY_DETACH_WINDOW_MS || '60000',
+  10,
+);
+
+/**
+ * Append a frame to a session's ring buffer, evicting oldest frames if
+ * the total byte count exceeds RING_BUFFER_MAX_BYTES. Eviction is at
+ * frame boundaries (one PTY write = one frame), so we never cut a
+ * multi-byte UTF-8 sequence or a partial ANSI CSI in half — claude's
+ * on-data callback emits coherent frames.
+ *
+ * Side effect: scans the appended chunk for alt-screen enter/exit
+ * sequences (CSI ?1049h / CSI ?1049l) and updates session.altScreenActive
+ * so the re-attach prelude knows whether to re-enter alt-screen.
+ */
+function appendToRingBuffer(session: PtySession, frame: Buffer): void {
+  session.ringBuffer.push(frame);
+  session.ringBufferBytes += frame.length;
+  while (session.ringBufferBytes > RING_BUFFER_MAX_BYTES && session.ringBuffer.length > 1) {
+    const evicted = session.ringBuffer.shift()!;
+    session.ringBufferBytes -= evicted.length;
+  }
+  // Alt-screen tracking. Scan for the canonical xterm enter/exit pairs.
+  // We do this on every append (not just on attach) so the state is
+  // correct even if many frames have flowed since the last attach.
+  const ascii = frame.toString('latin1'); // single-byte view is enough — the codes are 7-bit ASCII
+  // Use lastIndexOf so trailing state wins when both appear in one frame
+  // (e.g., a quick tool-call open+close inside one render pass).
+  const enterIdx = ascii.lastIndexOf('\x1b[?1049h');
+  const exitIdx = ascii.lastIndexOf('\x1b[?1049l');
+  if (enterIdx >= 0 && enterIdx > exitIdx) session.altScreenActive = true;
+  else if (exitIdx >= 0 && exitIdx > enterIdx) session.altScreenActive = false;
+}
+
+/**
+ * Build the re-attach replay payload: server-side reset prelude + the
+ * accumulated ring buffer. The client side writes RIS (`\x1bc`) to xterm
+ * BEFORE feeding this payload in, so the layout is:
+ *
+ *   1. Client: `\x1bc` (RIS — full reset, clears pre-blip xterm content)
+ *   2. Server: `\x1b[!p` (DECSTR soft reset — re-defaults char attributes)
+ *   3. Server: optional `\x1b[?1049h` if we were in alt-screen at detach
+ *   4. Server: ring buffer contents, in append order
+ *
+ * The client coordinates the order by waiting for a `{type:"reattach-begin"}`
+ * text frame before treating the next binary frame as replay. That separation
+ * is what lets us prepend reset codes without clobbering the live stream
+ * that resumes immediately after.
+ */
+function buildReplayPayload(session: PtySession): Buffer {
+  const parts: Buffer[] = [];
+  parts.push(Buffer.from('\x1b[!p'));
+  if (session.altScreenActive) parts.push(Buffer.from('\x1b[?1049h'));
+  for (const frame of session.ringBuffer) parts.push(frame);
+  return Buffer.concat(parts);
+}
 
 const sessions = new WeakMap<any, PtySession>(); // ws -> session
 
@@ -342,7 +457,15 @@ function maybeSpawnPty(ws: any, session: PtySession): boolean {
     const flush = combined.slice(0, safeEnd);
     leftover = combined.slice(safeEnd);
     if (flush.length) {
-      try { ws.sendBinary(flush); } catch {}
+      // Always record into the ring buffer (Commit 3) so re-attach can
+      // replay. session.liveWs is what changes across re-attaches — we
+      // close over `session`, not the original `ws`, so the write always
+      // goes to whichever ws is currently attached (or is skipped when
+      // detached and liveWs is null).
+      appendToRingBuffer(session, flush);
+      if (session.liveWs) {
+        try { session.liveWs.sendBinary(flush); } catch {}
+      }
     }
   });
   if (!proc) {
@@ -358,7 +481,7 @@ function maybeSpawnPty(ws: any, session: PtySession): boolean {
   }
   session.proc = proc;
   proc.exited?.then?.(() => {
-    try { ws.close(1000, 'pty exited'); } catch {}
+    try { session.liveWs?.close(1000, 'pty exited'); } catch {}
   });
   return true;
 }
@@ -408,6 +531,12 @@ function buildServer() {
           if (!sid) return { killed: 0 };
           const session = sessionsById.get(sid);
           if (!session) return { killed: 0 };
+          // Cancel any pending detach timer before disposal — otherwise it
+          // would fire later against an already-disposed session.
+          if (session.detachTimer) {
+            clearTimeout(session.detachTimer);
+            session.detachTimer = null;
+          }
           disposeSession(session);
           sessionsById.delete(sid);
           return { killed: 1 };
@@ -528,14 +657,53 @@ function buildServer() {
        */
       open(ws) {
         const sessionId = (ws.data as any)?.sessionId ?? null;
+        const cookie = (ws.data as any)?.cookie || '';
+
+        // Commit 3 re-attach: if this sessionId already has a detached
+        // PtySession in sessionsById, REPLACE its liveWs ref and replay
+        // the ring buffer. The PTY process is unchanged — claude keeps
+        // running through the wifi blip / panel-suspend cycle.
+        if (sessionId) {
+          const existing = sessionsById.get(sessionId);
+          if (existing) {
+            if (existing.detachTimer) {
+              clearTimeout(existing.detachTimer);
+              existing.detachTimer = null;
+            }
+            existing.detached = false;
+            existing.liveWs = ws;
+            existing.cookie = cookie;
+            // Re-bind the WS-keyed map so resize/close/message handlers
+            // can still find this session via the new ws.
+            sessions.set(ws, existing);
+            // Restart keepalive on the new ws.
+            if (existing.pingInterval) clearInterval(existing.pingInterval);
+            existing.pingInterval = setInterval(() => {
+              try { ws.send(JSON.stringify({ type: 'ping', ts: Date.now() })); } catch {}
+            }, KEEPALIVE_INTERVAL_MS);
+            // Tell the client to prep its xterm (write RIS) before the
+            // replay binary arrives. Order matters — the binary frame
+            // immediately after this text frame IS the replay.
+            try { ws.send(JSON.stringify({ type: 'reattach-begin', sessionId })); } catch {}
+            try { ws.sendBinary(buildReplayPayload(existing)); } catch {}
+            return;
+          }
+        }
+
         const session: PtySession = {
           proc: null,
           cols: 80,
           rows: 24,
-          cookie: (ws.data as any)?.cookie || '',
+          cookie,
+          liveWs: ws,
           sessionId,
           spawned: false,
           pingInterval: null,
+          ringBuffer: [],
+          ringBufferBytes: 0,
+          altScreenActive: false,
+          detached: false,
+          detachTimer: null,
         };
         session.pingInterval = setInterval(() => {
           try {
@@ -545,7 +713,7 @@ function buildServer() {
           }
         }, KEEPALIVE_INTERVAL_MS);
         sessions.set(ws, session);
-        // Index by sessionId for /internal/restart + (Commit 3) re-attach.
+        // Index by sessionId for /internal/restart + Commit 3 re-attach.
         if (sessionId) sessionsById.set(sessionId, session);
       },
 
@@ -560,9 +728,15 @@ function buildServer() {
             cols: 80,
             rows: 24,
             cookie: (ws.data as any)?.cookie || '',
+            liveWs: ws,
             sessionId: (ws.data as any)?.sessionId ?? null,
             spawned: false,
             pingInterval: null,
+            ringBuffer: [],
+            ringBufferBytes: 0,
+            altScreenActive: false,
+            detached: false,
+            detachTimer: null,
           };
           sessions.set(ws, session);
           if (session.sessionId) sessionsById.set(session.sessionId, session);
@@ -627,24 +801,49 @@ function buildServer() {
         }
       },
 
-      close(ws) {
+      close(ws, code, _reason) {
         const session = sessions.get(ws);
-        if (session) {
-          if (session.pingInterval) {
-            clearInterval(session.pingInterval);
-            session.pingInterval = null;
-          }
-          disposeSession(session);
-          if (session.cookie) {
-            // Drop the cookie so it can't be replayed against a new PTY.
-            validTokens.delete(session.cookie);
-          }
-          // Drop the sessionId index too (Commit 3 will revisit this for
-          // re-attach where we WANT the session to outlive the original ws
-          // for the 60s detach window; for now, close = full dispose).
-          if (session.sessionId) sessionsById.delete(session.sessionId);
-          sessions.delete(ws);
+        if (!session) return;
+        // Always drop the WS-keyed map entry and the per-attach
+        // attachToken — the attach grant was single-use.
+        sessions.delete(ws);
+        if (session.cookie) validTokens.delete(session.cookie);
+        // Keepalive lives with the WS — every attach starts a fresh one.
+        if (session.pingInterval) {
+          clearInterval(session.pingInterval);
+          session.pingInterval = null;
         }
+
+        // Commit 3 detach state machine. If the close was intentional
+        // (code 4001 = restart, 4404 = no-claude error), dispose
+        // immediately — there's no value in keeping the PTY alive.
+        // Otherwise enter the detach window: claude keeps running, the
+        // ring buffer keeps accumulating, and a re-attach with the same
+        // sessionId within DETACH_WINDOW_MS picks back up. If the timer
+        // fires without a re-attach, the session is disposed normally.
+        //
+        // Sessions without a sessionId (legacy single-shot grants) can't
+        // re-attach by definition — fall through to immediate dispose.
+        const intentional = code === 4001 || code === 4404 || code === 1000;
+        if (intentional || !session.sessionId) {
+          disposeSession(session);
+          if (session.sessionId) sessionsById.delete(session.sessionId);
+          return;
+        }
+
+        // Mark detached and start the disposal timer. The session stays
+        // in sessionsById so the next /ws upgrade with the same
+        // sessionId can find and reattach to it.
+        session.detached = true;
+        session.liveWs = null;
+        session.detachTimer = setTimeout(() => {
+          if (!session.detached) return; // re-attached in the meantime
+          disposeSession(session);
+          if (session.sessionId) sessionsById.delete(session.sessionId);
+        }, DETACH_WINDOW_MS);
+        // setTimeout returns a Bun Timer; unref so the detach window
+        // doesn't keep the process alive past natural shutdown.
+        (session.detachTimer as any)?.unref?.();
       },
     },
   });
