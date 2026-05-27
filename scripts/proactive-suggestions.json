@@ -253,6 +253,11 @@
       "routing": "Future /scrape calls with the same intent run\nthe codified script in ~200ms instead of re-driving the page. Walks\nback through the conversation, synthesizes script.ts + script.test.ts\n+ fixture, runs the test in a temp dir, and asks before committing.\nUse when asked to \"skillify\", \"codify\", \"save this scrape\", or\n\"make this permanent\".",
       "voice_line": null
     },
+    "spec": {
+      "lead": "Turn vague intent into a precise, executable spec in five phases.",
+      "routing": "Files the issue,\noptionally spawns a Claude Code agent in a fresh worktree, and lets /ship close\nthe source issue on merge. Use when asked to \"spec this out\", \"file an issue\",\n\"write up a ticket\", \"make this a GitHub issue\", or \"turn this into a backlog item\".",
+      "voice_line": null
+    },
     "sync-gbrain": {
       "lead": "Keep gbrain current with this repo's code and refresh agent search guidance in CLAUDE.md. Wraps the gstack-gbrain-sync orchestrator with state",
       "routing": "probing, native code-surface registration, capability checks,\nand a verdict block. Re-runnable, idempotent. Use when: \"sync gbrain\",\n\"refresh gbrain\", \"re-index this repo\", \"gbrain search isn't finding\nthings\".",

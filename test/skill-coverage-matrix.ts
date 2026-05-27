@@ -64,6 +64,18 @@ export const SKILL_COVERAGE: Record<string, SkillCoverage> = {
     periodic: [],
     rationale: 'browse binary has its own integration suite under browse/test/.',
   },
+  spec: {
+    gate: [
+      'test/spec-template-invariants.test.ts',
+      'test/spec-template-sync.test.ts',
+      'test/skill-coverage-floor.test.ts',
+    ],
+    periodic: [
+      'test/skill-e2e-spec-execute.test.ts',
+      'test/skill-llm-eval-spec.test.ts',
+    ],
+    rationale: '37 deterministic invariants pin Phase 1/3 gating, --execute race/security hardening, quality-gate redaction, archive contract, plan-mode-aware Phase 5. Periodic adds full PTY pipeline + LLM-judge.',
+  },
 
   // ─── Plan triad ─────────────────────────────────────────────
   'plan-ceo-review': {
