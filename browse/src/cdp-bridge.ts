@@ -95,20 +95,14 @@ export async function getOrCreateCdpSession(
 
 // ─── $B cdp bridge ─────────────────────────────────────────────
 
-// Per-page CDPSession cache. Created lazily on first allow-listed call,
-// cleaned up when the page closes. TODO(C2): migrate to getOrCreateCdpSession
-// so the session also detaches on close (currently only the cache entry is
-// removed; the Chromium-side target lingers).
+// Per-page CDPSession cache. Lifecycle delegated to getOrCreateCdpSession
+// which registers a close hook that BOTH removes the cache entry AND calls
+// session.detach() — pre-helper code only did the former, leaving the
+// Chromium-side target attached.
 const sessionCache: WeakMap<Page, any> = new WeakMap();
 
 async function getCdpSession(page: Page): Promise<any> {
-  let s = sessionCache.get(page);
-  if (s) return s;
-  s = await page.context().newCDPSession(page);
-  sessionCache.set(page, s);
-  // Clear cache on detach so we don't hold a stale handle.
-  page.once('close', () => sessionCache.delete(page));
-  return s;
+  return getOrCreateCdpSession(page, sessionCache);
 }
 
 export interface CdpDispatchInput {

@@ -13,6 +13,7 @@
  */
 
 import type { Page } from 'playwright';
+import { getOrCreateCdpSession } from './cdp-bridge';
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -106,15 +107,23 @@ async function getOrCreateSession(page: Page): Promise<any> {
     }
   }
 
-  session = await page.context().newCDPSession(page);
-  cdpSessions.set(page, session);
+  session = await getOrCreateCdpSession(page, cdpSessions);
 
-  // Enable DOM and CSS domains
-  await session.send('DOM.enable');
-  await session.send('CSS.enable');
-  initializedPages.add(page);
+  // Enable DOM and CSS domains on first init for this page. The session
+  // itself is cached + close-detached by getOrCreateCdpSession; the
+  // initializedPages WeakSet is inspector-layer state that needs its
+  // own close hook to stay in sync.
+  if (!initializedPages.has(page)) {
+    await session.send('DOM.enable');
+    await session.send('CSS.enable');
+    initializedPages.add(page);
+    page.once('close', () => initializedPages.delete(page));
+  }
 
-  // Auto-detach on navigation
+  // Auto-detach on navigation — DOM/CSS domain state is tied to the
+  // document. Close-detach (from getOrCreateCdpSession) handles the
+  // tab-close case; framenavigated catches in-tab navigation that
+  // invalidates inspector state without closing the tab.
   page.once('framenavigated', () => {
     try {
       session.detach().catch(() => {});
