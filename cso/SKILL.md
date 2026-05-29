@@ -883,6 +883,60 @@ INFRASTRUCTURE SURFACE
 
 Scan git history for leaked credentials, check tracked `.env` files, find CI configs with inline secrets.
 
+**Canonical pattern catalog** (shared with `/spec`'s in-flight redaction, generated
+from `lib/redact-patterns.ts` — the archaeology greps below target the HIGH-tier
+prefixes from this table):
+
+**HIGH — genuinely-secret credentials. Blocks dispatch/file/edit/commit.**
+
+| ID | Catches | Example |
+|----|---------|---------|
+| `aws.access_key` | AWS access key ID (AKIA…) | AKIA… |
+| `aws.secret_key` | AWS secret access key (with aws_secret_access_key nearby) | 40-char base64 near aws_secret_access_key |
+| `github.pat` | GitHub personal access token (classic) | ghp_… |
+| `github.oauth` | GitHub OAuth token | gho_… |
+| `github.server` | GitHub server-to-server token | ghs_… |
+| `github.fine_grained` | GitHub fine-grained PAT | github_pat_… |
+| `anthropic.key` | Anthropic API key | sk-ant-… |
+| `openai.key` | OpenAI API key (incl. sk-proj-) | sk-… / sk-proj-… |
+| `sendgrid.key` | SendGrid API key | SG.x.y |
+| `stripe.secret` | Stripe live SECRET key | sk_live_… |
+| `slack.token` | Slack token (bot/user/app) | xoxb-/xoxp-… |
+| `slack.webhook` | Slack incoming webhook URL | hooks.slack.com/services/… |
+| `discord.webhook` | Discord webhook URL | discord.com/api/webhooks/… |
+| `twilio.auth_token` | Twilio auth token (32 hex, with an Account SID nearby) | 32-hex near an AC… SID |
+| `pem.private_key` | PEM private key block | -----BEGIN … PRIVATE KEY----- |
+| `db.url_with_password` | Database URL with embedded password | postgres://user:pw@host |
+| `creds.basic_auth_url` | HTTP(S) URL with embedded basic-auth credentials | https://user:pw@host |
+
+**MEDIUM — PII, legal/damaging, internal-leak, and high-FP credential-shaped patterns. AskUserQuestion to confirm (sterner on public repos); never auto-blocked.**
+
+| ID | Catches | Example |
+|----|---------|---------|
+| `stripe.publishable` | Stripe live publishable key (often intentionally public) | pk_live_… |
+| `google.api_key` | Google API key (AIza…; sometimes a public client key) | AIza… |
+| `jwt` | JSON Web Token (3-segment base64url) | eyJ….eyJ….sig |
+| `env.kv` | Env-style SECRET assignment with high-entropy value | FOO_SECRET=<high-entropy> |
+| `pii.email` | Email address | name@host.tld |
+| `pii.phone.e164` | Phone number (E.164 / common national formats; US/EU-biased) | +1 415 555 0123 |
+| `pii.ssn` | US Social Security Number | 123-45-6789 |
+| `pii.cc` | Credit-card number (Luhn-valid) | Luhn-valid 13-19 digits |
+| `pii.ip_public` | Public IPv4 address | public IPv4 |
+| `pii.wallet` | Crypto wallet address (ETH/BTC) | 0x… / bc1… / 1… |
+| `internal.hostname` | Internal hostname (*.internal/.corp/.local/.prod/.staging) | host.corp / host.internal |
+| `internal.url_private` | localhost URL with a non-trivial path | http://localhost:PORT/path |
+| `legal.nda_marker` | Confidentiality / NDA marker | CONFIDENTIAL / UNDER NDA |
+| `legal.named_criticism` | Negative judgment near a capitalized full name (semantic pass is primary) | negative judgment + a full name |
+
+**LOW — surfaced as an FYI, never blocks.**
+
+| ID | Catches | Example |
+|----|---------|---------|
+| `internal.user_path` | Absolute path under a user home dir | /Users/<name>/… , /home/<name>/… |
+| `hygiene.todo` | TODO(owner) marker carried into the artifact | TODO(owner) |
+
+Calibration: a gate that cries wolf gets ignored, so context-variable / high-FP credential shapes (Stripe publishable `pk_live_`, Google `AIza`, JWTs, env-style `*_KEY=`) sit at MEDIUM, not HIGH. The full taxonomy lives in `lib/redact-patterns.ts` and this table is generated from it.
+
 **Git history — known secret prefixes:**
 ```bash
 git log -p --all -S "AKIA" --diff-filter=A -- "*.env" "*.yml" "*.yaml" "*.json" "*.toml" 2>/dev/null

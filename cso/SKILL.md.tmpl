@@ -159,6 +159,12 @@ INFRASTRUCTURE SURFACE
 
 Scan git history for leaked credentials, check tracked `.env` files, find CI configs with inline secrets.
 
+**Canonical pattern catalog** (shared with `/spec`'s in-flight redaction, generated
+from `lib/redact-patterns.ts` — the archaeology greps below target the HIGH-tier
+prefixes from this table):
+
+{{REDACT_TAXONOMY_TABLE}}
+
 **Git history — known secret prefixes:**
 ```bash
 git log -p --all -S "AKIA" --diff-filter=A -- "*.env" "*.yml" "*.yaml" "*.json" "*.toml" 2>/dev/null

@@ -63,9 +63,16 @@ const TIER_BLURB: Record<Tier, string> = {
   LOW: 'LOW — surfaced as an FYI, never blocks.',
 };
 
-export function generateRedactTaxonomyTable(_ctx: TemplateContext): string {
+export function generateRedactTaxonomyTable(_ctx: TemplateContext, args?: string[]): string {
+  // Compact mode: HIGH-tier rows only (the credentials that BLOCK), one line of
+  // prose for MEDIUM/LOW. For skills that RUN redaction (e.g. /spec) but aren't
+  // the security catalog — they need to know what blocks + where the full list
+  // is, not inline all ~30 patterns. /cso renders the full table.
+  const compact = args?.[0] === 'compact';
   const out: string[] = [];
-  for (const tier of ['HIGH', 'MEDIUM', 'LOW'] as Tier[]) {
+
+  const tiers: Tier[] = compact ? ['HIGH'] : ['HIGH', 'MEDIUM', 'LOW'];
+  for (const tier of tiers) {
     out.push(`**${TIER_BLURB[tier]}**`, '');
     out.push('| ID | Catches | Example |');
     out.push('|----|---------|---------|');
@@ -74,12 +81,21 @@ export function generateRedactTaxonomyTable(_ctx: TemplateContext): string {
     }
     out.push('');
   }
-  out.push(
-    'Calibration: a gate that cries wolf gets ignored, so context-variable / ' +
-      'high-FP credential shapes (Stripe publishable `pk_live_`, Google `AIza`, ' +
-      'JWTs, env-style `*_KEY=`) sit at MEDIUM, not HIGH. The full taxonomy lives ' +
-      'in `lib/redact-patterns.ts` and this table is generated from it.',
-  );
+
+  if (compact) {
+    out.push(
+      'MEDIUM (PII / legal / internal + high-FP credential shapes like ' +
+        '`pk_live_`/`AIza`/JWT/`*_KEY=`) confirms via AskUserQuestion; LOW surfaces ' +
+        'as an FYI. Full taxonomy: `lib/redact-patterns.ts` (or `/cso`).',
+    );
+  } else {
+    out.push(
+      'Calibration: a gate that cries wolf gets ignored, so context-variable / ' +
+        'high-FP credential shapes (Stripe publishable `pk_live_`, Google `AIza`, ' +
+        'JWTs, env-style `*_KEY=`) sit at MEDIUM, not HIGH. The full taxonomy lives ' +
+        'in `lib/redact-patterns.ts` and this table is generated from it.',
+    );
+  }
   return out.join('\n');
 }
 
@@ -103,28 +119,35 @@ const SINKS: Record<string, SinkSpec> = {
 
 export function generateRedactInvocationBlock(ctx: TemplateContext, args?: string[]): string {
   const sinkLabel = args?.[0] ?? 'pre-issue';
+  const brief = args?.[1] === 'brief';
   const sink = SINKS[sinkLabel] ?? SINKS['pre-issue'];
   const bin = `${ctx.paths.binDir}/gstack-redact`;
 
+  // Brief variant: a compact pointer for repeat sinks, so the full ~40-line
+  // procedure ships once per skill, not once per enforcement point.
+  if (brief) {
+    return `#### Redaction scan — ${sinkLabel} (${sink.noun})
+
+Run the SAME scan-at-sink procedure shown above (resolve \`$REDACT_VIS\` once and
+reuse it; write the exact bytes to \`$REDACT_FILE\`; \`${bin} --from-file "$REDACT_FILE"
+--repo-visibility "$REDACT_VIS" --json\`), now on ${sink.noun}. Apply the same
+exit-3/2/0 handling. On exit 3, do NOT ${sink.blockVerb}; HIGH has no skip. Pass the
+same \`$REDACT_FILE\` downstream so the bytes scanned are the bytes sent.`;
+  }
+
   return `#### Redaction scan — ${sinkLabel} (${sink.noun})
 
-Run the shared redaction engine on the EXACT bytes that will be sent. Write the
-content to a temp file, scan that file, and pass the SAME file downstream — never
-scan a string then re-render it (that reopens a scan-vs-send gap).
+Scan-at-sink on the EXACT bytes that will be sent: write to a temp file, scan that
+file, pass the SAME file downstream. Never scan a string then re-render it.
 
 \`\`\`bash
-command -v bun >/dev/null 2>&1 || { echo "redaction scan skipped — bun not on PATH (install bun)"; }
-# Resolve repo visibility once per skill run; cache it. Order: local config
-# (~/.gstack, never committed) → gh → glab → unknown(=public-strict wording).
+command -v bun >/dev/null 2>&1 || echo "redaction scan skipped — bun not on PATH"
+# Resolve visibility once; cache + reuse. Order: local config (~/.gstack, never
+# committed) → gh → glab → unknown(=public-strict).
 REDACT_VIS=$(~/.claude/skills/gstack/bin/gstack-config get redact_repo_visibility 2>/dev/null)
-if [ -z "$REDACT_VIS" ]; then
-  REDACT_VIS=$(gh repo view --json visibility -q .visibility 2>/dev/null | tr 'A-Z' 'a-z')
-fi
-if [ -z "$REDACT_VIS" ]; then
-  REDACT_VIS=$(glab repo view -F json 2>/dev/null | grep -o '"visibility":"[^"]*"' | head -1 | sed 's/.*:"//;s/"//' | tr 'A-Z' 'a-z')
-fi
+[ -z "$REDACT_VIS" ] && REDACT_VIS=$(gh repo view --json visibility -q .visibility 2>/dev/null | tr 'A-Z' 'a-z')
+[ -z "$REDACT_VIS" ] && REDACT_VIS=$(glab repo view -F json 2>/dev/null | grep -o '"visibility":"[^"]*"' | head -1 | sed 's/.*:"//;s/"//' | tr 'A-Z' 'a-z')
 REDACT_VIS="\${REDACT_VIS:-unknown}"
-
 REDACT_FILE=$(mktemp)
 cat > "$REDACT_FILE" <<'REDACT_BODY_EOF'
 <the exact ${sink.noun} goes here>
@@ -133,28 +156,22 @@ REDACT_JSON=$(${bin} --from-file "$REDACT_FILE" --repo-visibility "$REDACT_VIS" 
 REDACT_CODE=$?
 \`\`\`
 
-Then branch on \`$REDACT_CODE\`:
+Branch on \`$REDACT_CODE\`:
 
-1. **Exit 3 (HIGH)** — print the findings table. Do NOT ${sink.blockVerb}. Tell the
-   user to rotate the credential (a leaked secret is compromised) and redact at the
-   source, then re-run. There is no skip flag for HIGH. Stop. Do not persist
-   ${sink.noun} anywhere downstream.
-2. **Exit 2 (MEDIUM)** — for each finding, AskUserQuestion (cluster identical ids;
-   on a PUBLIC repo use sterner per-finding wording with no batch-acknowledge and
-   no silent-proceed):
-   - For the PII subset (\`pii.email\`/\`pii.phone.e164\`/\`pii.ssn\`/\`pii.cc\`) offer
-     **Auto-redact** (re-run \`${bin} --from-file "$REDACT_FILE" --auto-redact <ids> --repo-visibility "$REDACT_VIS"\`,
-     which prints the sanitized body + a diff; use that body as the new ${sink.noun}),
-     **Edit manually**, or **Cancel**.
-   - For non-PII MEDIUM (hostnames, IPs, NDA markers, demoted-credential shapes)
-     offer **Proceed (acknowledged)** / **Edit** / **Cancel** — no auto-redact.
-3. **Exit 0 (clean)** — proceed. Surface any \`WARN\` findings (tool-attributed-fence
-   degrades) and \`LOW\` findings as a one-line FYI; they never block.
+1. **Exit 3 (HIGH)** — print findings; do NOT ${sink.blockVerb}; tell the user to
+   rotate + redact at source, then re-run. No skip flag for HIGH. Do not persist
+   ${sink.noun} anywhere.
+2. **Exit 2 (MEDIUM)** — AskUserQuestion per finding (cluster identical ids; PUBLIC
+   repos get sterner wording, no batch-acknowledge, no silent-proceed). PII subset
+   (\`pii.email\`/\`pii.phone.e164\`/\`pii.ssn\`/\`pii.cc\`) gets **Auto-redact** (re-run
+   with \`--auto-redact <ids>\` → use the printed sanitized body) / **Edit** / **Cancel**;
+   non-PII MEDIUM gets **Proceed (acknowledged)** / **Edit** / **Cancel** (no auto-redact).
+3. **Exit 0 (clean)** — proceed; surface \`WARN\` (tool-fence degrades) + \`LOW\` as a
+   one-line FYI (never blocks).
 
 \`\`\`bash
 rm -f "$REDACT_FILE"
 \`\`\`
 
-This is a guardrail, not airtight enforcement: a determined user can always bypass
-it with direct \`gh\`/\`git\`. It catches accidents.`;
+Guardrail, not airtight enforcement — direct \`gh\`/\`git\` bypass it; it catches accidents.`;
 }
