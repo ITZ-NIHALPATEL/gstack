@@ -209,6 +209,22 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     minUnionBytes: 55_000,
     mustContain: ['CHANGELOG', 'Diataxis', 'coverage'],
   },
+  'design-consultation': {
+    skill: 'design-consultation',
+    expectedSections: ['proposal-and-preview.md'],
+    requiredReads: ['proposal-and-preview.md'],
+    scenario:
+      'The user gave product context (a B2B analytics dashboard for ops teams) and declined the research phase. Skip browser/design tool setup. Proceed to build the complete design-system proposal, then write DESIGN.md. Produce the proposal and the DESIGN.md content.',
+    staticInvariants: {
+      mustStayInSkeleton: ['## Phase 0: Pre-checks', '## Phase 1: Product Context', '## Phase 2: Research'],
+      mustMoveToSection: ['## Phase 3: The Complete Proposal', '## Phase 6: Write DESIGN.md'],
+      gateAfterStop: undefined,
+    },
+    behavioral: 'prompt',
+    maxSkeletonBytes: 64_000,
+    minUnionBytes: 72_000,
+    mustContain: ['Typography', 'Color', 'Aesthetic Direction'],
+  },
 };
 
 /** Sorted carved-skill names. Consumers derive their lists from this — no parallel lists. */
