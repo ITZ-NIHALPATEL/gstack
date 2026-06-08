@@ -334,6 +334,32 @@ DX IMPLEMENTATION CHECKLIST
 ### Unresolved Decisions
 If any AskUserQuestion goes unanswered, note here. Never silently default.
 
+## Review Log
+
+After producing the DX Scorecard above, persist the review result. Without this step
+the Review Readiness Dashboard and the GSTACK REVIEW REPORT have no plan-devex-review
+data to read, and the EXIT PLAN MODE GATE's "review log was called" check cannot pass.
+
+**PLAN MODE EXCEPTION — ALWAYS RUN:** This command writes review metadata to
+`~/.gstack/` (user config directory, not project files). The skill preamble
+already writes to `~/.gstack/sessions/` and `~/.gstack/analytics/` — this is
+the same pattern. The review dashboard depends on this data. Skipping this
+command breaks the review readiness dashboard in /ship.
+
+```bash
+~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"plan-devex-review","timestamp":"TIMESTAMP","status":"STATUS","initial_score":N,"overall_score":N,"product_type":"PRODUCT_TYPE","tthw_current":"TTHW_CURRENT","tthw_target":"TTHW_TARGET","mode":"MODE","persona":"PERSONA","competitive_tier":"COMPETITIVE_TIER","unresolved":N,"commit":"COMMIT"}'
+```
+
+Substitute values from the DX Scorecard and Step 0 setup:
+- **TIMESTAMP**: current ISO 8601 datetime
+- **STATUS**: "clean" if overall score 8+ AND 0 unresolved; otherwise "issues_open"
+- **initial_score**: initial overall DX score before fixes (0-10)
+- **overall_score**: final overall DX score after fixes (0-10)
+- **product_type / persona / competitive_tier / mode**: from Step 0 setup
+- **tthw_current / tthw_target**: time-to-hello-world now vs target
+- **unresolved**: number of unresolved decisions
+- **COMMIT**: output of `git rev-parse --short HEAD`
+
 {{REVIEW_DASHBOARD}}
 
 {{PLAN_FILE_REVIEW_REPORT}}
