@@ -600,8 +600,9 @@ $P generate --no-confidential memo.md memo.pdf
 
 ### Diagrams — mermaid and excalidraw fences render as pictures
 
-Any ` ```mermaid ` or ` ```excalidraw ` fence in the markdown renders as a
-crisp vector diagram, fully offline (vendored bundle, no CDN). A broken fence
+A column-0 ` ```mermaid ` or ` ```excalidraw ` fence in the markdown renders
+as a crisp vector diagram, fully offline (vendored bundle, no CDN). Indented
+fences (inside lists) stay plain code blocks by design. A broken fence
 produces a visible red diagnostic block with the parse error — never silent
 raw code.
 
@@ -611,6 +612,7 @@ Fence info-string options:
 ```mermaid title="Auth flow"        ← caption + aria-label
 ```mermaid render=false             ← keep it as a code block (today's behavior)
 ```mermaid page=landscape           ← force this diagram onto a landscape page
+```mermaid page=portrait            ← veto auto-landscape for this diagram
 ```
 
 A ` ```excalidraw ` fence contains a full .excalidraw scene file (what

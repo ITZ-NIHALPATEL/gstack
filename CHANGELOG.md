@@ -10,15 +10,15 @@ vector diagram, fully offline, with the source preserved for round-trips. A brok
 fence prints a loud red diagnostic block with the parse error, never silent raw
 code. The new `/diagram` skill goes the other way: describe a flow in English and
 get a triplet back, the mermaid source, an editable `.excalidraw` file you can open
-at excalidraw.com, and rendered SVG + PNG in the hand-drawn style. Images got the
+at excalidraw.com in the hand-drawn style, and rendered SVG + PNG. Images got the
 same care: local paths inline automatically and never truncate, phone photos
 downscale to print resolution instead of blowing up the file, and a wide small-text
 diagram promotes itself onto a vertically centered landscape page inside an
 otherwise portrait document. One markdown file now exports three ways:
 `--to pdf | html | docx`, where html is one self-contained file with zero network
 references. Type is bigger across the board (12pt body, 56pt cover titles), TOC
-links actually jump, and `--strict` turns missing or out-of-tree images into hard
-CI failures.
+links actually jump, and `--strict` turns missing, remote, out-of-tree, or
+oversized images into hard CI failures.
 
 ### The numbers that matter
 
@@ -49,8 +49,8 @@ pasting screenshots of diagrams into documents. Run `/diagram` for the picture,
 ### Itemized changes
 
 #### Added
-- ` ```mermaid ` and ` ```excalidraw ` fences render as inline vector SVG in every
-  output format. Fence options: `title="..."` (caption + aria-label),
+- ` ```mermaid ` and ` ```excalidraw ` fences render as inline vector SVG in pdf
+  and html output (docx embeds them as 300dpi PNGs). Fence options: `title="..."` (caption + aria-label),
   `render=false` (keep as code), `page=landscape|portrait` (orientation override).
   Render failures produce a visible diagnostic block with the parse error.
 - `/diagram` skill: English in, editable triplet out (`.mmd` source,
@@ -67,8 +67,9 @@ pasting screenshots of diagrams into documents. Run `/diagram` for the picture,
 - Conservative auto-landscape: wide, small-text, diagram-like images get their
   own vertically centered landscape page (aspect ≥ 1.8, width over ~2.5x the
   content box, diagram-ish alt word). Directives override in both directions.
-- `--strict` for CI: missing images, remote images, out-of-tree image reads, and
-  oversized files fail the run instead of degrading to placeholders.
+- `--strict` for CI: missing images, remote images, out-of-tree image reads,
+  oversized files, and non-regular files fail the run instead of degrading to
+  placeholders.
 - `docs/howto-diagrams-and-formats.md`: the full walkthrough, fences to formats.
 
 #### Changed

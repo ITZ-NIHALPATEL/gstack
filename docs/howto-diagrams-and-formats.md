@@ -24,7 +24,10 @@ make-pdf generate doc.md out.pdf
 
 The fence renders as a **vector** diagram (crisp at any zoom, selectable
 text), with the `title` as caption and accessibility label. The raw mermaid
-source is preserved in an HTML comment inside the document for debugging.
+source is preserved base64-encoded in a `data-gstack-source` attribute on the
+figure for debugging and round-trips (an HTML comment would corrupt mermaid's
+`-->` arrows). One catch: the fence must start at **column 0** — indented
+fences (inside lists, for example) stay plain code blocks by design.
 
 **Fence options** (space-separated in the info string):
 
@@ -83,8 +86,10 @@ make-pdf generate doc.md out.docx --to docx
 ```
 
 - **`--to html`** writes ONE self-contained file: diagrams as inline SVG,
-  images as data URIs, zero network references, plus a screen-reading layer
-  (centered measure, padding). Email it, attach it, open it anywhere.
+  images as data URIs, zero network references (under the default offline
+  posture — `--allow-network` deliberately keeps remote image tags live),
+  plus a screen-reading layer (centered measure, padding). Email it, attach
+  it, open it anywhere.
 - **`--to docx`** is a content-fidelity export: headings, tables, code
   blocks, lists, and diagrams (embedded as 300dpi PNGs with alt text) carry
   over. Page-perfect layout does not — that's Word's job once it's open.

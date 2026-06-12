@@ -22,7 +22,8 @@ triggers:
 ## When to invoke this skill
 
 on excalidraw.com,
-and rendered SVG + PNG. Hand-drawn excalidraw aesthetic, fully offline.
+and rendered SVG + PNG (clean mermaid style; the .excalidraw carries the
+hand-drawn aesthetic). Fully offline.
 Use when asked to "make a diagram", "draw the architecture", "create a
 flowchart", "diagram this", or "visualize this flow".
 
