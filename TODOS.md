@@ -2377,3 +2377,23 @@ Pre-existing in `auq-sdk-capture.ts` — affects `skill-e2e-ship-section-loading
 path to the fixture during the run.
 
 **Effort:** S (human ~3h, CC ~30min). **Depends on:** None.
+
+### P3: Content-hash diagram render cache for make-pdf
+
+**What:** Cache rendered diagram SVG/PNG in `~/.gstack/cache/diagram-render/`,
+keyed on `sha256(fence source + bundle version + render options)`, so repeat
+`make-pdf` runs skip the browse render tab for unchanged diagrams.
+
+**Why:** Every run currently re-renders every fence (~150-300ms each). Docs with
+10+ diagrams pay seconds per iteration during write-preview loops. Codex
+outside-voice flagged the missing cache story during the eng review of the
+diagram engine plan (2026-06-11, D7).
+
+**Context:** The diagram-render bundle ships a `BUILD_INFO.json` with a content
+hash (see `lib/diagram-render/`) — use that as the bundle-version cache key
+component so bundle bumps invalidate cleanly. Invalidation surface is the main
+risk: stale renders after a mermaid theme change must not survive. Only worth
+building once users hit multi-diagram docs; wedge perf is fine without it.
+
+**Effort:** S (human ~1d, CC ~30min). **Depends on:** diagram engine wedge
+shipping (lib/diagram-render bundle versioning).
