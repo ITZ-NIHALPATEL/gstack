@@ -128,6 +128,19 @@ describe("fail closed on unscannable diffs (#1946)", () => {
     expect(code).toBe(0);
   });
 
+  test("a remote sha absent locally (shallow clone / stale fetch) falls back to scanning MORE, not blocking", () => {
+    // Adversarial review finding 8: remote..local can't resolve when the
+    // remote tip object isn't in the local odb. The fallback scans the
+    // merge-base/empty-tree range — a secret in the pushed content still
+    // blocks; a clean push passes instead of hard-failing.
+    const fakeRemoteSha = "c".repeat(40);
+    const head = commit("secrets.txt", "key AKIA1234567890ABCDEF\n", "leaky commit");
+    const { code, stderr } = runHook(`refs/heads/main ${head} refs/heads/main ${fakeRemoteSha}\n`);
+    expect(code).toBe(1); // fallback range still catches the credential
+    expect(stderr).toContain("aws.access_key");
+    expect(stderr).not.toContain("could not compute the pushed diff");
+  });
+
   test("a diff killed by a signal (null status — the maxBuffer/kill class) BLOCKS", () => {
     // Stub git: probes delegate to the real git; the diff invocation kills
     // itself, producing spawnSync status === null. This is the exact branch

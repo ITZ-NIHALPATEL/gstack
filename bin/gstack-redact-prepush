@@ -64,6 +64,12 @@ function gitStrict(args: string[]): string {
   return r.stdout ?? "";
 }
 
+/** True when the object exists in the local odb (cat-file -e signals via exit code). */
+function objectExists(sha: string): boolean {
+  const r = spawnSync("git", ["cat-file", "-e", sha], { encoding: "utf8" });
+  return r.status === 0;
+}
+
 function defaultRemoteBranch(): string {
   // origin/HEAD → origin/main, fall back to main/master.
   const sym = git(["symbolic-ref", "refs/remotes/origin/HEAD"]).trim();
@@ -81,6 +87,13 @@ function addedLinesFor(localSha: string, remoteSha: string): string {
     // New branch: prefer what's unique to localSha vs the remote default branch.
     // With no merge-base (e.g. no remote yet), diff against the empty tree so ALL
     // branch content is scanned as added — fail-safe (scans more, never less).
+    const base = git(["merge-base", localSha, defaultRemoteBranch()]).trim();
+    range = base ? `${base}..${localSha}` : `${EMPTY_TREE}..${localSha}`;
+  } else if (!objectExists(remoteSha)) {
+    // Remote tip object absent locally (shallow clone, force-push without a
+    // prior fetch, CI checkout): remote..local can't resolve. Fall back to
+    // the merge-base/empty-tree path — scans MORE, never less — instead of
+    // hard-blocking a legitimate push (adversarial review finding 8).
     const base = git(["merge-base", localSha, defaultRemoteBranch()]).trim();
     range = base ? `${base}..${localSha}` : `${EMPTY_TREE}..${localSha}`;
   } else {

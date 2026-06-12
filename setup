@@ -1493,7 +1493,12 @@ fi
 # checkout, the wrong repo to install it into. /ship offers the install once
 # at the moment of relevance (first push) and silently installs in any repo
 # where redact_prepush_hook=true. This hint is setup's whole involvement.
-if [ "$("$GSTACK_CONFIG" get redact_prepush_hook 2>/dev/null || echo false)" != "true" ]; then
+# Hint only when UNSET — an explicit "false" is a recorded decline and must
+# not be re-nagged on every setup run (adversarial review finding 11).
+# `gstack-config get` defaults absent keys to "false", which is
+# indistinguishable from a decline — test key presence in the config file.
+_GSTACK_CFG_FILE="${GSTACK_HOME:-$HOME/.gstack}/config.yaml"
+if ! grep -q '^redact_prepush_hook:' "$_GSTACK_CFG_FILE" 2>/dev/null; then
   log ""
   log "Tip: gstack can block pushes containing credentials (per-repo git hook)."
   log "     Enable once: gstack-config set redact_prepush_hook true — /ship"

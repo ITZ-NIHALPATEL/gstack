@@ -92,7 +92,10 @@ export function probeTimeoutMs(env?: NodeJS.ProcessEnv): number {
   if (!raw) return DEFAULT_PROBE_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_PROBE_TIMEOUT_MS;
-  return Math.floor(parsed);
+  // Floor of 1ms: Math.floor(0.5) would yield 0, and execFileSync treats
+  // timeout: 0 as NO timeout — the probe that exists to bound hangs would
+  // itself hang forever (adversarial review finding 2).
+  return Math.max(1, Math.floor(parsed));
 }
 
 /** Effective user home — respects HOME env override (used by tests). */

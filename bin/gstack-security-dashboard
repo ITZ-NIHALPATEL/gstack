@@ -49,7 +49,11 @@ trap 'rm -f "$TMPBODY"' EXIT
 HTTP_CODE="$(curl -s --max-time 15 -w '%{http_code}' -o "$TMPBODY" \
   "${SUPABASE_URL}/functions/v1/community-pulse" \
   -H "apikey: ${ANON_KEY}" \
-  2>/dev/null || echo "000")"
+  2>/dev/null || true)"
+# curl prints its own 000 before a non-zero exit — a `|| echo` here would
+# double it to "000000" in user-facing output. Normalize to the last 3 chars.
+HTTP_CODE="$(printf '%s' "$HTTP_CODE" | tr -d '[:space:]' | tail -c 3)"
+[ -n "$HTTP_CODE" ] || HTTP_CODE="000"
 DATA="$(cat "$TMPBODY" 2>/dev/null || echo "")"
 
 # Classify the response:
@@ -119,40 +123,36 @@ elif [ "$TOTAL" = "0" ]; then
 fi
 echo ""
 
-# Top attacked domains — parse objects inside top_attack_domains array
-DOMAINS="$(echo "$DATA" | sed -n 's/.*"top_attack_domains":\(\[[^]]*\]\).*/\1/p' | head -1)"
-if [ -n "$DOMAINS" ] && [ "$DOMAINS" != "[]" ]; then
+# Array sections — jq is guaranteed past the state gate; the old sed/grep
+# parsing truncated at the first ']' and dropped entries on any nesting
+# (the same bug class as the "every count is 7" TOTAL grep).
+DOMAINS="$(echo "$DATA" | jq -r '.security.top_attack_domains[]? | "\(.domain)\t\(.count)"' 2>/dev/null)"
+if [ -n "$DOMAINS" ]; then
   echo "Top attacked domains"
   echo "────────────────────"
-  echo "$DOMAINS" | grep -o '{[^}]*}' | head -10 | while read -r OBJ; do
-    DOMAIN="$(echo "$OBJ" | grep -o '"domain":"[^"]*"' | awk -F'"' '{print $4}')"
-    COUNT="$(echo "$OBJ" | grep -o '"count":[0-9]*' | grep -o '[0-9]*')"
+  printf '%s\n' "$DOMAINS" | head -10 | while IFS="$(printf '\t')" read -r DOMAIN COUNT; do
     [ -n "$DOMAIN" ] && [ -n "$COUNT" ] && printf "  %-40s %s attempts\n" "$DOMAIN" "$COUNT"
   done
   echo ""
 fi
 
 # Which layer catches attacks
-LAYERS="$(echo "$DATA" | sed -n 's/.*"top_attack_layers":\(\[[^]]*\]\).*/\1/p' | head -1)"
-if [ -n "$LAYERS" ] && [ "$LAYERS" != "[]" ]; then
+LAYERS="$(echo "$DATA" | jq -r '.security.top_attack_layers[]? | "\(.layer)\t\(.count)"' 2>/dev/null)"
+if [ -n "$LAYERS" ]; then
   echo "Top detection layers"
   echo "────────────────────"
-  echo "$LAYERS" | grep -o '{[^}]*}' | while read -r OBJ; do
-    LAYER="$(echo "$OBJ" | grep -o '"layer":"[^"]*"' | awk -F'"' '{print $4}')"
-    COUNT="$(echo "$OBJ" | grep -o '"count":[0-9]*' | grep -o '[0-9]*')"
+  printf '%s\n' "$LAYERS" | while IFS="$(printf '\t')" read -r LAYER COUNT; do
     [ -n "$LAYER" ] && [ -n "$COUNT" ] && printf "  %-28s %s\n" "$LAYER" "$COUNT"
   done
   echo ""
 fi
 
 # Verdict distribution
-VERDICTS="$(echo "$DATA" | sed -n 's/.*"verdict_distribution":\(\[[^]]*\]\).*/\1/p' | head -1)"
-if [ -n "$VERDICTS" ] && [ "$VERDICTS" != "[]" ]; then
+VERDICTS="$(echo "$DATA" | jq -r '.security.verdict_distribution[]? | "\(.verdict)\t\(.count)"' 2>/dev/null)"
+if [ -n "$VERDICTS" ]; then
   echo "Verdict distribution"
   echo "────────────────────"
-  echo "$VERDICTS" | grep -o '{[^}]*}' | while read -r OBJ; do
-    VERDICT="$(echo "$OBJ" | grep -o '"verdict":"[^"]*"' | awk -F'"' '{print $4}')"
-    COUNT="$(echo "$OBJ" | grep -o '"count":[0-9]*' | grep -o '[0-9]*')"
+  printf '%s\n' "$VERDICTS" | while IFS="$(printf '\t')" read -r VERDICT COUNT; do
     [ -n "$VERDICT" ] && [ -n "$COUNT" ] && printf "  %-14s %s\n" "$VERDICT" "$COUNT"
   done
   echo ""

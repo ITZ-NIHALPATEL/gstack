@@ -101,7 +101,7 @@ function run(
     // needs — everything except jq.
     const toolBin = join(tmp, "tool-bin");
     mkdirSync(toolBin, { recursive: true });
-    for (const tool of ["mktemp", "cat", "grep", "head", "sed", "awk", "rm", "sh", "bash"]) {
+    for (const tool of ["mktemp", "cat", "grep", "head", "sed", "awk", "rm", "sh", "bash", "tr", "tail"]) {
       const real = Bun.which(tool);
       if (real) symlinkSync(real, join(toolBin, tool));
     }
@@ -253,5 +253,20 @@ describe("gstack-community-dashboard — never reports fake zeros (#1947)", () =
     const r = run(COMM_BIN, { mode: "ok", body: spaced });
     expect(r.stdout).toContain("Weekly active installs: 42");
     expect(r.stdout).not.toContain("unverified");
+  });
+
+  it("stale snapshot flagged in human mode (matches security-dashboard)", () => {
+    const staleBody = JSON.stringify({ ...JSON.parse(GOOD_BODY_MARKER), stale: true });
+    const r = run(COMM_BIN, { mode: "ok", body: staleBody });
+    expect(r.stdout).toContain("Weekly active installs: 42");
+    expect(r.stdout).toContain("stale snapshot");
+  });
+
+  it("network failure reports HTTP 000, never a doubled 000000", () => {
+    // Adversarial review finding 6: curl prints its own 000 before a
+    // non-zero exit; a `|| echo` doubled it in user-facing output.
+    const r = run(COMM_BIN, { mode: "netfail" });
+    expect(r.stdout).toContain("(HTTP 000)");
+    expect(r.stdout).not.toContain("000000");
   });
 });

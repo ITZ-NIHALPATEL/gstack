@@ -297,6 +297,11 @@ describe("probeTimeoutMs — env override parsing", () => {
     expect(probeTimeoutMs({ GSTACK_GBRAIN_PROBE_TIMEOUT_MS: "0" })).toBe(DEFAULT_PROBE_TIMEOUT_MS);
     expect(probeTimeoutMs({ GSTACK_GBRAIN_PROBE_TIMEOUT_MS: "-5" })).toBe(DEFAULT_PROBE_TIMEOUT_MS);
   });
+
+  it("never returns 0 for fractional sub-millisecond values (0 = NO timeout in execFileSync)", () => {
+    expect(probeTimeoutMs({ GSTACK_GBRAIN_PROBE_TIMEOUT_MS: "0.5" })).toBe(1);
+    expect(probeTimeoutMs({ GSTACK_GBRAIN_PROBE_TIMEOUT_MS: "0.0001" })).toBe(1);
+  });
 });
 
 describe("lib/gbrain-local-status — cache behavior", () => {
