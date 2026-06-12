@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# gstack-detach — run a long-running command in its OWN session (a fresh process
+# group with no controlling terminal) so a SIGTERM aimed at the launching shell's
+# process group can't reach it.
+#
+# Why this exists: when an AGENT/harness launches a 30-60 min eval as a background
+# task, the harness sends SIGTERM ("polite quit") to that task's process group on
+# turn boundaries, monitor stops, or interruptions — killing the run mid-flight
+# (observed: `script "test:gate" was terminated by signal SIGTERM`). Detaching into
+# a new session escapes that group signal. Humans running evals foreground in their
+# own terminal don't need this (Ctrl-C is intended); this is for agent-run jobs.
+#
+# Usage:  gstack-detach <logfile> -- <command> [args...]
+#         (the `--` is optional but recommended for clarity)
+# Output: prints `PID <n>  LOG <path>` and returns immediately. Poll the logfile;
+#         the command keeps running independently of this shell.
+# Secrets: inherited from the environment ONLY. NEVER pass an API key in argv
+#          (it would show in `ps`). Export it before calling gstack-detach.
+set -euo pipefail
+
+LOG="${1:?usage: gstack-detach <logfile> -- <command...>}"; shift
+[ "${1:-}" = "--" ] && shift
+[ "$#" -ge 1 ] || { echo "gstack-detach: no command given" >&2; exit 2; }
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+
+# Preferred path: python3 creates the new session (portable; macOS has no setsid)
+# and, on macOS, wraps the command in `caffeinate -i` so idle-sleep can't kill a
+# long run — a second silent killer for 30-60 min jobs.
+if command -v python3 >/dev/null 2>&1; then
+  GSTACK_DETACH_LOG="$LOG" exec python3 - "$@" <<'PY'
+import os, sys, shutil, subprocess
+os.setsid()  # new session => new process group, no controlling terminal
+log = os.environ["GSTACK_DETACH_LOG"]
+cmd = sys.argv[1:]
+if shutil.which("caffeinate"):            # macOS: block idle-sleep for the run
+    cmd = ["caffeinate", "-i", *cmd]
+f = open(log, "ab", buffering=0)
+p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+print(f"PID {p.pid}  LOG {log}")
+PY
+fi
+
+# Linux without python3: real setsid.
+if command -v setsid >/dev/null 2>&1; then
+  setsid sh -c 'exec "$@" >>"$0" 2>&1' "$LOG" "$@" &
+  echo "PID $!  LOG $LOG"; disown 2>/dev/null || true; exit 0
+fi
+
+# Last resort: nohup detaches from SIGHUP (not a group SIGTERM, but better than
+# nothing on a minimal box).
+nohup sh -c 'exec "$@" >>"$0" 2>&1' "$LOG" "$@" >/dev/null 2>&1 &
+echo "PID $!  LOG $LOG"; disown 2>/dev/null || true
