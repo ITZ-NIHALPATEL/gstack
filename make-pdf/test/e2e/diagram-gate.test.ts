@@ -78,25 +78,43 @@ describe("diagram render gate", () => {
     const outputPdf = path.join(workDir, "out.pdf");
     const ppmPrefix = path.join(workDir, "page");
     try {
-      execFileSync(PDF_BIN, ["generate", FIXTURE, outputPdf, "--quiet"], {
-        encoding: "utf8",
+      // No --quiet: stderr carries the downscale warning asserted below.
+      const run = Bun.spawnSync([PDF_BIN, "generate", FIXTURE, outputPdf], {
         env: { ...process.env, BROWSE_BIN },
-        stdio: ["ignore", "pipe", "pipe"],
-        timeout: CHILD_TIMEOUT_MS,
+        stdout: "pipe",
+        stderr: "pipe",
       });
+      const stderr = new TextDecoder().decode(run.stderr);
+      if (run.exitCode !== 0) {
+        throw new Error(`generate failed (exit ${run.exitCode}):\n${stderr}`);
+      }
       expect(fs.existsSync(outputPdf)).toBe(true);
+
+      // 0. Print-resolution downscale fired on the 4200px noise photo — this
+      //    is the only live coverage of __downscaleRaster AND the chunked
+      //    jsViaBuffer transport (the data URI exceeds the 100KB argv path).
+      expect(stderr).toMatch(/downscaled huge-noise\.png 4200px → \d+px/);
 
       const pdftotext = resolvePopplerTool("pdftotext")!;
       const text = execFileSync(pdftotext, [outputPdf, "-"], { encoding: "utf8", timeout: CHILD_TIMEOUT_MS });
 
-      // 1. Vector text from BOTH diagrams (multi-fence + id-collision check —
-      //    a collided render drops the second diagram's content).
+      // 1. Vector text from BOTH diagrams (multi-fence + id-collision check).
+      //    The broken fence sits BETWEEN them in the fixture, so the second
+      //    diagram rendering at all proves the reset contract (D6.2): the
+      //    bundle page reloaded after the failure and kept working.
       for (const label of ["gatealphanode", "gatebetanode", "gategammanode", "gatedeltanode", "gateepsilonnode"]) {
         expect(text).toContain(label);
       }
 
-      // 2. Rendered fences must NOT ship raw mermaid; render=false must.
+      // 1b. The excalidraw fence rendered through exportToSvg (vector text
+      //     from the scene file, plus its caption).
+      expect(text).toContain("excalialphanode");
+      expect(text).toContain("excalibetanode");
+      expect(text).toContain("Converted flowchart");
+
+      // 2. Rendered fences must NOT ship raw mermaid/scene JSON; render=false must.
       expect(text).not.toContain("GATEALPHA[");
+      expect(text).not.toContain('"type":"excalidraw"');
       expect(text).toContain("RAWKEPT");
       expect(text).toContain("ASCODE");
 
