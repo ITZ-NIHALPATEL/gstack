@@ -1,79 +1,212 @@
 # Changelog
 
-## [1.58.0.0] - 2026-06-11
+## [1.58.1.0] - 2026-06-14
 
-## **In Conductor, gstack stops fighting a broken tool and just asks in plain text.**
-## **Every decision becomes a prose brief you answer with a letter, and a hook makes sure of it.**
+## **Local evals stop lying. Spawned `claude` test children run in a sealed clean room,**
+## **and in Conductor every decision is a plain-text brief you answer with a letter.**
 
-Conductor disables the native AskUserQuestion tool and routes through an MCP
-variant that frequently dies with `[Tool result missing due to internal error]`.
-The old behavior tried that flaky tool first and only fell back to text after it
-failed, which meant stalled prompts and dropped questions. Now, when gstack detects
-a Conductor session, it skips the tool entirely and renders every decision as a
-plain-text brief: a labeled question, a recommendation, completeness scores per
-option, and an instruction to reply with a letter. Your settled `/plan-tune`
-preferences still auto-decide first, so you are not asked about things you already
-told gstack to stop asking. Destructive confirmations now demand an explicit typed
-answer and refuse to proceed on a vague reply. And because the tool is never called
-on this path, gstack logs the decision itself so `/plan-tune` keeps learning.
+Two things shipped here. First, the local E2E harness is now hermetic by default:
+every spawned agent (claude -p, the real-PTY plan-mode runner, the Agent SDK
+runner, plus the codex and gemini runners) gets an allowlist-scrubbed environment,
+a fresh seeded `CLAUDE_CONFIG_DIR`, a temp `GSTACK_HOME`, and `--strict-mcp-config`.
+Before this, a dev machine leaked the operator's `~/.claude` config, MCP servers
+(gbrain, Conductor), skills, `~/.gstack` decision logs, and `CONDUCTOR_*`/`CLAUDECODE`
+env into every child, so local eval results disagreed with CI for reasons that had
+nothing to do with the code under test. Now local signal matches CI. Set
+`EVALS_HERMETIC=0` to debug against real operator state.
 
-This is enforced in three layers, and the third one actually ships: a PreToolUse
-hook denies any AskUserQuestion call in Conductor and redirects to prose. The hook
-is now installed for Conductor sessions even in non-interactive setup (it used to be
-skipped), and an upgrade migration adds it to existing Conductor installs.
+Second, in a Conductor session gstack no longer fights Conductor's flaky
+AskUserQuestion tool. It detects the session and renders every decision as a prose
+brief, a labeled question with a recommendation, per-option completeness scores, and
+"reply with a letter," enforced by a PreToolUse hook that denies the tool and
+redirects to prose. Destructive confirmations demand an explicit typed answer.
+
+Agents that launch long eval runs get `gstack-detach`: a SIGTERM-proof, idle-sleep-proof
+wrapper (fresh session + `caffeinate`) with a machine-wide lock so concurrent
+worktrees serialize instead of saturating the model API, run-scoped logs, and a
+guaranteed `EXIT=` sentinel so a poller never mistakes silence for success.
 
 ### The numbers that matter
 
-Verified by the deterministic hook unit suite (`test/question-preference-hook.test.ts`)
-and the resolver/preamble guards, all green this run.
+Measured against the gate eval suite on a contaminated dev box (gbrain MCP up, live
+Conductor session, sibling worktrees). Reproduce: `bun test` (free unit + wiring
+tripwire) and `EVALS=1 EVALS_TIER=gate bun test test/skill-e2e-hermetic-canary.test.ts`.
 
 | Metric | Before | After | Δ |
 |--------|--------|-------|---|
-| AskUserQuestion calls in Conductor | flaky tool, then fallback | 0 (prose by default) | eliminated |
-| Layer enforcing "no tool call" | guidance only | guidance + signal + PreToolUse hook | +2 |
-| Hook installed in Conductor non-interactive setup | no | yes | fixed |
-| `/plan-tune` learning on the prose path | lost (PostToolUse never fired) | captured via gstack-question-log | restored |
-| Destructive confirmation gate in text | "reply with a letter" | explicit typed confirmation, no vague proceed | hardened |
+| Spawned-child env | full operator `process.env` | allowlist-scrubbed | sealed |
+| Runners hermeticized | 0 of 5 | 5 of 5 | +5 |
+| Operator MCP servers visible to child | all (gbrain, Conductor) | 0 (`--strict-mcp-config`) | isolated |
+| Config isolation proof | none | poisoned-operator sentinel canary | falsifiable |
+| Long eval runs surviving a turn-boundary SIGTERM | no | yes (`gstack-detach`) | survives |
 
-The sharpest fix is the silent one: headless evals running inside Conductor used to
-risk rendering a prose question to nobody. The Conductor signal is now gated so a
-headless session still BLOCKs and waits, exactly as before.
+The clean room is falsifiable, not asserted: a `hermetic-sentinel` gate canary
+plants a poisoned operator config (a user `CLAUDE.md` + an MCP server) and fails if
+the child can see any of it, and a free static tripwire fails CI if any runner
+reverts to a raw `process.env` spread.
 
-### What this means for Conductor users
+### What this means for contributors
 
-Questions just work. You answer in the chat the way you already do, settled
-preferences are honored without re-asking, and irreversible actions ask for a real
-confirmation instead of a one-letter shrug. Run `gstack-config set plan_tune_hooks no`
-if you want guidance-only prose without the enforcing hook.
+Run evals locally and trust the result. You no longer have to push to CI to find
+out whether a failure was real or just your machine bleeding context into the agent.
+Three latent bugs the old harness hid surfaced the moment the suite ran clean and
+are fixed: a coverage-judge that scored carved skills against half a document, an
+ios-qa daemon test that collided on a shared pidfile under concurrency, and an
+operational-learning fixture missing a lib it imports. Start a run with
+`bun run eval:bg:gate`; flip `EVALS_HERMETIC=0` only when you deliberately want your
+real `~/.claude` in the loop.
 
 ### Itemized changes
 
 #### Added
-- Conductor-default prose rendering for all AskUserQuestion decisions, signalled by
-  `CONDUCTOR_SESSION` in the preamble (gated on a non-headless session).
-- A one-way/destructive prose rule (explicit typed confirmation, never proceed on a
-  vague reply) and a typed-reply continuation protocol for split-chain questions.
-- `lib/is-conductor.ts` — shared, call-time Conductor detection.
-- Upgrade migration `v1.58.0.0` that registers the PreToolUse hook for existing
-  Conductor installs.
+- **Hermetic E2E environment** (`test/helpers/hermetic-env.ts`): allowlist env
+  builder (process basics, network/proxy vars, named `ANTHROPIC_*` auth, per-runner
+  `extraAllow`), pure `promotedEnv()` shared with `lib/conductor-env-shim.ts`, a
+  sync-memoized singleton temp dir (`<runRoot>/.claude` keeps the plan-file path
+  contract), a seeded `.claude.json` for non-interactive first run, and pid-aware GC
+  of crashed runs. Default-on; `EVALS_HERMETIC=0` restores the legacy env AND drops
+  `--strict-mcp-config`.
+- **Two gate-tier isolation canaries** (`test/skill-e2e-hermetic-canary.test.ts`):
+  `hermetic-canary` asserts env redirect + scrub + zero MCP servers + nonzero
+  API-key cost from the Bash tool_result (not model prose); `hermetic-sentinel`
+  proves the child cannot see a planted poisoned operator config.
+- **Static wiring tripwire** (`test/hermetic-wiring.test.ts`): free-tier invariants
+  that fail CI if any of the five runners drops `hermeticChildEnv()`, the gated
+  `--strict-mcp-config`, or leaks `process.env` through a callsite override.
+- **`gstack-detach`** + `eval:bg` / `eval:bg:all` / `eval:bg:gate` / `eval:bg:periodic`
+  scripts: detached, SIGTERM-proof, `caffeinate`-wrapped eval runs with a machine-wide
+  lock, per-run logs under `~/.gstack-dev/eval-runs/`, a watchdog, and an `EXIT=`
+  sentinel.
+- **Conductor prose AskUserQuestion**: when a Conductor session is detected, every
+  decision renders as a prose brief (labeled question, recommendation, per-option
+  completeness, reply-with-a-letter), enforced by a PreToolUse hook that denies the
+  tool and redirects. Auto-decide preferences still apply first; destructive
+  confirmations require an explicit typed answer. Installed for Conductor even in
+  non-interactive setup, with an upgrade migration for existing installs.
 
 #### Changed
-- The PreToolUse `question-preference-hook` now denies AskUserQuestion in Conductor
-  and redirects to a prose brief (transport avoidance), while never-ask auto-decide
-  preferences still take precedence and non-Conductor behavior is unchanged.
-- `setup` installs the PreToolUse hook for Conductor sessions even on the
-  non-interactive fall-through, without overriding an explicit opt-out.
+- All five E2E runners (`session-runner`, `claude-pty-runner`, `agent-sdk-runner`,
+  `codex-session-runner`, `gemini-session-runner`) spawn children through
+  `hermeticChildEnv()`. The Agent SDK runner now receives a COMPLETE hermetic env
+  via `Options.env` (the old "never pass env: to the SDK" rule was partial-env
+  replacement; a complete env is safe).
+- `hermetic-env.ts` is a global touchfile, so any change to it selects every E2E +
+  judge test.
+- CLAUDE.md documents hermetic-by-default local evals and retires the stale SDK env
+  warning.
 
 #### Fixed
-- Conductor prose decisions are now logged via `gstack-question-log`, so `/plan-tune`
-  history and learning survive on the path where the tool is never called.
+- The workflow LLM-judge now re-appends body-carved `sections/*.md` after the marker
+  slice, so carved skills (document-release) are judged on the full workflow the
+  agent executes instead of a half-document.
+- ios-qa daemon scenarios use unique pidfiles, fixing `already_running` collisions
+  under `bun test --concurrent`.
+
+## [1.58.0.0] - 2026-06-12
+
+## **Your documents grow diagrams. Mermaid and excalidraw fences render as real pictures,**
+## **and make-pdf now ships single-file HTML and Word output from the same markdown.**
+
+Put a ` ```mermaid ` fence in your markdown and `make-pdf` renders it as a crisp
+vector diagram, fully offline, with the source preserved for round-trips. A broken
+fence prints a loud red diagnostic block with the parse error, never silent raw
+code. The new `/diagram` skill goes the other way: describe a flow in English and
+get a triplet back, the mermaid source, an editable `.excalidraw` file you can open
+at excalidraw.com in the hand-drawn style, and rendered SVG + PNG. Images got the
+same care: local paths inline automatically and never truncate, phone photos
+downscale to print resolution instead of blowing up the file, and a wide small-text
+diagram promotes itself onto a vertically centered landscape page inside an
+otherwise portrait document. One markdown file now exports three ways:
+`--to pdf | html | docx`, where html is one self-contained file with zero network
+references. Type is bigger across the board (12pt body, 56pt cover titles), TOC
+links actually jump, and `--strict` turns missing, remote, out-of-tree, or
+oversized images into hard CI failures.
+
+### The numbers that matter
+
+Measured on this repo's README (5,940 words, lists, code, screenshots, one
+diagram fence) and the free gate suite. Reproduce: `make-pdf generate README.md
+--cover --toc` and `bun test make-pdf/test/`.
+
+| Metric | Before | After | Δ |
+|--------|--------|-------|---|
+| A mermaid fence in your PDF | raw code block | vector diagram | rendered |
+| Output formats from one markdown | 1 (pdf) | 3 (pdf, html, docx) | +2 |
+| Network requests at render time | up to 1 per remote image | 0 by default | sealed |
+| Wide-diagram handling | shrunk into portrait | own centered landscape page | rotated |
+| Free make-pdf gate tests | 121 | 189 | +68 |
+| README → 29-page PDF with diagram | n/a | 4.4s | one command |
+
+The sealed-network number is the one to notice: the mermaid and excalidraw
+runtimes are vendored into a 9.2MB sha-pinned bundle, so rendering works on a
+plane and a tracking pixel in pasted markdown fetches nothing.
+
+### What this means for your documents
+
+The diagram you describe in English stays editable forever: `/diagram` writes the
+source, you embed the source in markdown, and every export renders it fresh. Stop
+pasting screenshots of diagrams into documents. Run `/diagram` for the picture,
+` ```mermaid ` for the document, and `--to html` when the reader doesn't want a PDF.
+
+### Itemized changes
+
+#### Added
+- ` ```mermaid ` and ` ```excalidraw ` fences render as inline vector SVG in pdf
+  and html output (docx embeds them as 300dpi PNGs). Fence options: `title="..."` (caption + aria-label),
+  `render=false` (keep as code), `page=landscape|portrait` (orientation override).
+  Render failures produce a visible diagnostic block with the parse error.
+- `/diagram` skill: English in, editable triplet out (`.mmd` source,
+  `.excalidraw` scene, SVG + PNG). Flowcharts convert to fully editable
+  excalidraw scenes; other mermaid types render with an explicit limitation note.
+- `lib/diagram-render/`: vendored offline bundle (mermaid 11.12.2, excalidraw
+  0.18.0, exact pins), deterministic build, committed dist with sha256 + source
+  fingerprint, drift tests, THIRD-PARTY-LICENSES.
+- `--to pdf|html|docx` output formats. HTML is one self-contained file (inline
+  SVG diagrams, data-URI images, zero network refs, screen-readable). DOCX is a
+  content-fidelity export with diagrams embedded as 300dpi PNGs and alt text.
+- Per-image directives: `![x](a.png){width=full|50%|3in}` and
+  `{page=landscape|portrait}`.
+- Conservative auto-landscape: wide, small-text, diagram-like images get their
+  own vertically centered landscape page (aspect ≥ 1.8, width over ~2.5x the
+  content box, diagram-ish alt word). Directives override in both directions.
+- `--strict` for CI: missing images, remote images, out-of-tree image reads,
+  oversized files, and non-regular files fail the run instead of degrading to
+  placeholders.
+- `docs/howto-diagrams-and-formats.md`: the full walkthrough, fences to formats.
+
+#### Changed
+- Typography scale: 12pt body, 26pt h1, 56pt poster cover with 13pt meta, 12pt
+  TOC entries, larger code and tables. Auto-hyphenation is off so copy-paste
+  yields clean words.
+- Local images inline as data URIs with byte-probed dimensions and never
+  truncate; oversized photos downscale to print resolution at inline time;
+  repeated images are read once.
+- TOC links resolve in every format (headings get real anchor ids); the screen
+  layer hides print-only page-number dots in HTML output.
+- Remote images are blocked with a visible placeholder unless `--allow-network`
+  is passed; out-of-tree image reads (including via symlink) warn loudly.
+- `make-pdf preview` prints a note when the document contains fences or local
+  images that only `generate` renders fully.
+
+#### Fixed
+- Relative image paths render correctly in PDFs (previously resolved against the
+  wrong base and could show as broken boxes).
+- Fenced code inside lists survives the render byte-for-byte; indented fences
+  keep their list placement.
+- Documents containing `$&`-style sequences in diagram labels render exactly;
+  Windows drive-letter image paths resolve as local files; malformed
+  percent-encoded image URLs degrade gracefully instead of failing the run.
+- Per-side margins (`--margin-left` etc.) are honored on documents containing
+  landscape pages.
 
 #### For contributors
-- `test/skill-e2e-auto-decide-preserved.test.ts` now passes `GSTACK_HOME` into the
-  PTY run, fixing a latent bug where the seeded never-ask preference was never read.
-- New `test/skill-e2e-conductor-prose.test.ts` (periodic) plus deterministic
-  Conductor cases in the hook unit suite; affected carve skeleton caps bumped to
-  absorb the always-loaded AskUserQuestion Format additions.
+- 68 new free-tier gates (fence extraction, image policy, landscape promotion
+  with negative fixtures, format contracts, bundle drift) plus a paid gate-tier
+  /diagram triplet test and a periodic authoring-quality judge.
+- make-pdf-gate CI now covers `lib/diagram-render/**` and the drift test; the
+  committed bundle is pinned to LF in .gitattributes.
+- Fixed the `operational-learning` E2E fixture (bin scripts now ship with the
+  lib module they import).
 
 ## [1.57.10.0] - 2026-06-10
 
