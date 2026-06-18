@@ -437,12 +437,13 @@ export class BrowserManager {
 
     // Find the gstack extension directory for auto-loading
     const extensionPath = this.findExtensionPath();
-    const { buildGStackLaunchArgs } = await import('./stealth');
+    const { STEALTH_LAUNCH_ARGS, buildGStackLaunchArgs } = await import('./stealth');
     const launchArgs = [
       '--hide-crash-restore-bubble',
-      // Anti-bot-detection: remove the navigator.webdriver flag that Playwright sets.
-      // Sites like Google and NYTimes check this to block automation browsers.
-      '--disable-blink-features=AutomationControlled',
+      // Anti-bot-detection: --disable-blink-features=AutomationControlled (and any
+      // future blink-level tells) via the shared STEALTH_LAUNCH_ARGS constant — the
+      // same flag launch() and handoff() use, kept in one place instead of a literal.
+      ...STEALTH_LAUNCH_ARGS,
       // GStack Pack 1: per-install hardware/GPU/UA-CH overrides for the
       // C++ patches in gbrowser's Chromium build. Each switch is a no-op
       // on Chromium builds without the corresponding patch (the patch's
@@ -1541,8 +1542,11 @@ export class BrowserManager {
       const fs = require('fs');
       const path = require('path');
       const extensionPath = this.findExtensionPath();
-      const { buildGStackLaunchArgs } = await import('./stealth');
-      const launchArgs: string[] = ['--hide-crash-restore-bubble', ...buildGStackLaunchArgs()];
+      const { STEALTH_LAUNCH_ARGS, buildGStackLaunchArgs } = await import('./stealth');
+      // Same blink-level stealth flags as launch()/launchHeaded(). Without
+      // STEALTH_LAUNCH_ARGS the handed-off browser kept the AutomationControlled
+      // tell that the other two paths strip.
+      const launchArgs: string[] = ['--hide-crash-restore-bubble', ...STEALTH_LAUNCH_ARGS, ...buildGStackLaunchArgs()];
       if (extensionPath) {
         launchArgs.push(`--disable-extensions-except=${extensionPath}`);
         launchArgs.push(`--load-extension=${extensionPath}`);
